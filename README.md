@@ -1,6 +1,6 @@
-# K9s Deployment Lens (v3.5)
+# K9s Deployment Deck
 
-**K9s Deployment Lens** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
+**K9s Deployment Deck** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
 
 Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI framework.
 
@@ -32,9 +32,9 @@ Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI fram
 Create a directory for the plugin and install the required Go modules:
 
 ```bash
-mkdir k9s-lens
-cd k9s-lens
-go mod init k9s-lens
+mkdir k9s-deck
+cd k9s-deck
+go mod init k9s-deck
 
 go get github.com/charmbracelet/bubbletea
 go get github.com/charmbracelet/lipgloss
@@ -52,10 +52,10 @@ Copy the source code (from `main.go`) into the folder and build:
 
 ```bash
 # macOS / Linux
-go build -o k9s-lens main.go
+go build -o k9s-deck main.go
 
 # Windows
-go build -o k9s-lens.exe main.go
+go build -o k9s-deck.exe main.go
 ```
 
 ### 3. Configure K9s
@@ -66,9 +66,9 @@ Move the binary to a location of your choice (e.g., `~/.k9s/plugins/`) and updat
 # location: $HOME/.config/k9s/plugins.yaml (Linux)
 
 plugins:
-  go-lens:
+  go-deck:
     shortCut: Shift-I
-    description: "Deployment Lens"
+    description: "Deployment deck"
     scopes:
       - deployments
     command: "/path/to/your/k9s-deck" # <--- UPDATE THIS PATH
@@ -112,13 +112,13 @@ Press `:` to focus the command bar at the bottom. Type your command and press En
 ## 🧠 Architecture & Logic
 
 ### Smart Status Detection
-Standard `kubectl` JSON sometimes reports a Pod as "Waiting" (reason: `ContainerCreating`) even after it is `Running` and `Ready`. K9s Lens v3.5 fixes this:
+Standard `kubectl` JSON sometimes reports a Pod as "Waiting" (reason: `ContainerCreating`) even after it is `Running` and `Ready`. K9s deck v3.5 fixes this:
 1.  It calculates `Ready / Total` containers.
 2.  If `Ready == Total`, it forces the status to **Running (1/1)**, ignoring historical waiting reasons.
 3.  It only reports errors (like `CrashLoopBackOff`) if the pod is **not** ready.
 
 ### Resource Map
-The Lens automatically discovers and links:
+The deck automatically discovers and links:
 *   🚀 **Deployment:** The root object.
 *   ⚓ **Helm Release:** detected via `meta.helm.sh/release-name` annotation or label.
 *   📦 **Pods:** Live pods controlled by the deployment.
