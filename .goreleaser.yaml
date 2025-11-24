@@ -1,0 +1,46 @@
+version: 2
+project_name: k9s-deck
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - format: tar.gz
+    # This ensures the files are named cleanly: k9s-deck_Linux_amd64.tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+    
+    # This creates .zip for Windows instead of .tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+
+nfpms:
+  - id: packages
+    package_name: k9s-deck
+    vendor: "devpopsdotin"
+    homepage: "https://github.com/devpopsdotin/k9s-deck"
+    maintainer: "pops"
+    description: "k9s plugin, unified dashboard for k8s resources and cli"
+    license: "MIT"
+    formats:
+      - deb
+      - rpm
+      - archlinux
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
