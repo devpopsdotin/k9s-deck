@@ -1,0 +1,23 @@
+plugins:
+  # ---------------------------------------------------------------------------
+  # K9s Deck Plugin Configuration
+  # ---------------------------------------------------------------------------
+  k9s-deck:
+    shortCut: Shift-I
+    description: "K9s Deck"
+    scopes:
+      - deployments
+    
+    # ⚠️ IMPORTANT: Update the 'command' path below to match where you saved the binary ⚠️
+    
+    # Linux/macOS Example:
+    # command: "/usr/local/bin/k9s-deck"
+    
+    # Windows Example:
+    # command: "C:\\Tools\\k9s-deck.exe"
+    
+    background: false
+    args:
+      - $CONTEXT
+      - $NAMESPACE
+      - $NAME

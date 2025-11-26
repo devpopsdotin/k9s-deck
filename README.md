@@ -1,6 +1,7 @@
-# K9s Deployment Deck
 
-**K9s Deployment Deck** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
+# K9s Deck (v1.0.0)
+
+**K9s Deck** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
 
 Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI framework.
 
@@ -13,71 +14,65 @@ Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI fram
 
 *   **Real-Time Monitoring:** Auto-refreshes resource status every second.
 *   **Smart Status Detection:** Accurately distinguishes between `Running`, `ContainerCreating`, and `Terminating` states, handling complex edge cases where Kubernetes reports "Waiting" for fully Ready pods.
-*   **Split-Screen UI:** Browse resources on the left (40% width), view live details (YAML/Logs/Events) on the right.
+*   **Split-Screen UI:** Browse resources on the left (35% width), view live details (YAML/Logs/Events) on the right.
 *   **Command Mode (`:`):** Vim-style command bar to Scale, Restart, and Rollback directly from the plugin.
 *   **Tabbed Interface:** Toggle between Configuration (YAML) and Live Data (Logs/Events) with a single key.
 *   **Robust & Fast:** Includes strict timeouts (2s) on API calls to prevent UI freezing and "Smart Truncation" to handle long resource names on smaller screens.
 *   **Manual Control:** Force refresh data (`Ctrl+F`) when the API server is slow to propagate changes.
+*   **Quick Navigation:** Jump to specific resource types instantly using number keys (1-5). Supports cycling through multiple resources of the same type.
 
 ---
 
 ## 🛠️ Installation
 
-### Prerequisites
-*   **Go 1.21+** installed.
-*   **Kubernetes CLI** (`kubectl`) installed and configured.
-*   **Helm CLI** (`helm`) installed.
+### 1. Download Binary
+1.  Go to the [Releases Page](https://github.com/devpopsdotin/k9s-deck/releases) on GitHub.
+2.  Download the binary for your OS (Windows, macOS, or Linux).
+3.  Rename the file to `k9s-deck` (or `k9s-deck.exe` on Windows).
+4.  Move it to a permanent location (e.g., `/usr/local/bin/` or `~/.k9s/plugins/`).
 
-### 1. Initialize & Install Dependencies
-Create a directory for the plugin and install the required Go modules:
+### 2. Configure K9s
+You need to register the plugin in your K9s configuration.
 
-```bash
-mkdir k9s-deck
-cd k9s-deck
-go mod init k9s-deck
+1.  Locate your K9s plugins file:
+    *   **macOS:** `~/Library/Application Support/k9s/plugins.yaml`
+    *   **Linux:** `~/.config/k9s/plugins.yaml`
+    *   **Windows:** `%LOCALAPPDATA%\k9s\plugins.yaml`
 
-go get github.com/charmbracelet/bubbletea
-go get github.com/charmbracelet/lipgloss
-go get github.com/charmbracelet/bubbles/viewport
-go get github.com/charmbracelet/bubbles/textinput
-go get github.com/tidwall/gjson
-go get github.com/alecthomas/chroma/v2
-go get github.com/alecthomas/chroma/v2/quick
-go get github.com/alecthomas/chroma/v2/styles
-go mod tidy
-```
-
-### 2. Build the Binary
-Copy the source code (from `main.go`) into the folder and build:
-
-```bash
-# macOS / Linux
-go build -o k9s-deck main.go
-
-# Windows
-go build -o k9s-deck.exe main.go
-```
-
-### 3. Configure K9s
-Move the binary to a location of your choice (e.g., `~/.k9s/plugins/`) and update your K9s `plugins.yaml` file:
+2.  Add the configuration below. A ready-to-use **`plugins.yaml`** file is also included in this repository.
 
 ```yaml
-# location: $HOME/Library/Application Support/k9s/plugins.yaml (macOS)
-# location: $HOME/.config/k9s/plugins.yaml (Linux)
-
 plugins:
-  go-deck:
+  k9s-deck:
     shortCut: Shift-I
-    description: "Deployment deck"
+    description: "K9s Deck"
     scopes:
       - deployments
-    command: "/path/to/your/k9s-deck" # <--- UPDATE THIS PATH
+    # ⚠️ UPDATE THIS PATH to where you saved the binary
+    command: "/usr/local/bin/k9s-deck"
     background: false
     args:
       - $CONTEXT
       - $NAMESPACE
       - $NAME
 ```
+
+### Option B: Build from Source
+If you prefer to compile it yourself:
+
+1.  **Clone & Init:**
+    ```bash
+    mkdir k9s-deck
+    cd k9s-deck
+    # Copy main.go here
+    go mod init k9s-deck
+    go mod tidy
+    ```
+
+2.  **Build:**
+    ```bash
+    go build -o k9s-deck main.go
+    ```
 
 ---
 
@@ -88,6 +83,7 @@ plugins:
 | Key | Context | Action |
 | :--- | :--- | :--- |
 | **↑ / ↓** | Global | Select a resource (Pod, Secret, Helm, etc.). |
+| **1 - 5** | Global | **Quick Jump**: 1=Dep, 2=Helm, 3=CM, 4=Secret, 5=Pod.<br>*(Press repeatedly to cycle through items)* |
 | **Tab** | DEP / POD | **Toggle View**: Switch between YAML <-> Events (Deployment) or YAML <-> Logs (Pod). |
 | **Enter** | Global | Refresh the details pane for the selected item. |
 | **Ctrl + F** | Global | **Force Refresh**: Manually trigger a data fetch if the UI seems stale. |
@@ -112,13 +108,13 @@ Press `:` to focus the command bar at the bottom. Type your command and press En
 ## 🧠 Architecture & Logic
 
 ### Smart Status Detection
-Standard `kubectl` JSON sometimes reports a Pod as "Waiting" (reason: `ContainerCreating`) even after it is `Running` and `Ready`. K9s deck v3.5 fixes this:
+Standard `kubectl` JSON sometimes reports a Pod as "Waiting" (reason: `ContainerCreating`) even after it is `Running` and `Ready`. K9s Deck v1.0.0 fixes this:
 1.  It calculates `Ready / Total` containers.
 2.  If `Ready == Total`, it forces the status to **Running (1/1)**, ignoring historical waiting reasons.
 3.  It only reports errors (like `CrashLoopBackOff`) if the pod is **not** ready.
 
 ### Resource Map
-The deck automatically discovers and links:
+The Deck automatically discovers and links:
 *   🚀 **Deployment:** The root object.
 *   ⚓ **Helm Release:** detected via `meta.helm.sh/release-name` annotation or label.
 *   📦 **Pods:** Live pods controlled by the deployment.
