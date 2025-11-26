@@ -114,7 +114,7 @@ func main() {
 			Namespace = "default"
 			Deployment = "hello-app"
 		} else {
-			fmt.Println("Usage: k9s-lens <context> <namespace> <deployment>")
+			fmt.Println("Usage: k9s-deck <context> <namespace> <deployment>")
 			os.Exit(1)
 		}
 	} else {

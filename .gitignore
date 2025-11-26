@@ -1,4 +1,6 @@
 # Added by goreleaser init:
 dist/
 Makefile
+Makefile_safe
 k9s-lens
+k9s-deck
