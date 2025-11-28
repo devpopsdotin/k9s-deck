@@ -5,3 +5,6 @@ Makefile_safe
 k9s-lens
 k9s-deck
 .vscode
+Makefile_release.txt
+CLAUDE.md
+COMMIT_AND_PR.md
