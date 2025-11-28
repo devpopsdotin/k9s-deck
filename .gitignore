@@ -8,3 +8,5 @@ k9s-deck
 Makefile_release.txt
 CLAUDE.md
 COMMIT_AND_PR.md
+test-local.sh
+test-with-act.md

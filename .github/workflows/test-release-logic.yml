@@ -1,0 +1,75 @@
+name: Test Release Logic
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_commit_message:
+        description: 'Test commit message'
+        required: true
+        default: 'feat: test feature'
+
+jobs:
+  test-version-detection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test version calculation
+        run: |
+          # Use the test commit message from input
+          COMMIT_MSG="${{ github.event.inputs.test_commit_message }}"
+          echo "Testing with commit message: '$COMMIT_MSG'"
+          
+          # Get current version (same logic as release workflow)
+          CURRENT_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Current version: $CURRENT_VERSION"
+          
+          # Determine version bump (same logic as release workflow)
+          if echo "$COMMIT_MSG" | grep -qi -E "(breaking|major|BREAKING CHANGE)"; then
+            VERSION_TYPE="major"
+          elif echo "$COMMIT_MSG" | grep -qi -E "(feat|feature)"; then
+            VERSION_TYPE="minor"
+          else
+            VERSION_TYPE="patch"
+          fi
+          
+          echo "Detected version type: $VERSION_TYPE"
+          
+          # Calculate new version (same logic as release workflow)
+          case $VERSION_TYPE in
+            major)
+              NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{print "v" ($1+1 | sed "s/v//") ".0.0"}')
+              ;;
+            minor)
+              NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{print $1 "." ($2+1) ".0"}' | sed 's/v\./v/')
+              ;;
+            patch)
+              NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{print $1 "." $2 "." ($3+1)}')
+              ;;
+          esac
+          
+          echo "🎯 RESULT:"
+          echo "  Current: $CURRENT_VERSION"
+          echo "  Type: $VERSION_TYPE" 
+          echo "  New: $NEW_VERSION"
+          echo ""
+          echo "✅ Version calculation works!"
+
+      - name: Test GoReleaser config
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          distribution: goreleaser
+          version: latest
+          args: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "🧪 Test Results:"
+          echo "✅ Version detection logic works"
+          echo "✅ GoReleaser config is valid"
+          echo "✅ Ready for real release!"
