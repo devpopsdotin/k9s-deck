@@ -13,9 +13,11 @@ Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI fram
 ## 🌟 Key Features
 
 *   **Real-Time Monitoring:** Auto-refreshes resource status every second.
+*   **Multi-Deployment Support:** Monitor multiple deployments simultaneously with stable, flicker-free UI.
 *   **Smart Status Detection:** Accurately distinguishes between `Running`, `ContainerCreating`, and `Terminating` states, handling complex edge cases where Kubernetes reports "Waiting" for fully Ready pods.
 *   **Split-Screen UI:** Browse resources on the left (35% width), view live details (YAML/Logs/Events) on the right.
-*   **Command Mode (`:`):** Vim-style command bar to Scale, Restart, and Rollback directly from the plugin.
+*   **Quick Action Shortcuts:** Lightning-fast operations with `rr` (restart), `s` (scale), `R` (rollback), `+` (add), `rm` (remove).
+*   **Command Mode (`:`):** Vim-style command bar to Scale, Restart, Rollback, Add, and Remove deployments directly from the plugin.
 *   **Tabbed Interface:** Toggle between Configuration (YAML) and Live Data (Logs/Events) with a single key.
 *   **Robust & Fast:** Includes strict timeouts (2s) on API calls to prevent UI freezing and "Smart Truncation" to handle long resource names on smaller screens.
 *   **Manual Control:** Force refresh data (`Ctrl+F`) when the API server is slow to propagate changes.
@@ -90,7 +92,18 @@ If you prefer to compile it yourself:
 | **Ctrl + L** | Pod | **Quick Logs**: View the last 200 lines of logs in the right pane. |
 | **Ctrl + S** | Pod | **Search Logs**: Opens full logs in `less` for searching (`/pattern`). |
 | **:** | Global | Enter **Command Mode**. |
+| **/** | Global | Enter **Filter Mode**. |
 | **q** | Global | Quit the plugin. |
+
+### ⚡ Quick Action Shortcuts
+
+| Key | Context | Action |
+| :--- | :--- | :--- |
+| **rr** | Global | **Restart Deployment**: Double-tap 'r' to instantly restart the current deployment. |
+| **s** | Global | **Scale Deployment**: Opens prompt to enter replica count. |
+| **R** | Global | **Rollback Deployment**: Opens prompt to enter revision number (requires Helm release). |
+| **+** | Global | **Add Deployment**: Opens prompt to add another deployment to monitor. |
+| **rm** | Global | **Remove Deployment**: Press 'r' then 'm' to remove deployment from monitoring. |
 
 ### Command Mode (`:`)
 
@@ -101,6 +114,8 @@ Press `:` to focus the command bar at the bottom. Type your command and press En
 | **Scale** | `:scale <N>` | Scales the deployment to `N` replicas (e.g., `:scale 3`). |
 | **Restart** | `:restart` | Triggers a rolling restart (`kubectl rollout restart`). |
 | **Rollback** | `:rollback <Rev>` | Rolls back the Helm release to a specific revision (e.g., `:rollback 5`). |
+| **Add** | `:add <name>` | Adds another deployment to monitor (e.g., `:add web-frontend`). |
+| **Remove** | `:remove <name>` | Removes a deployment from monitoring (e.g., `:remove web-frontend`). |
 | **Fetch** | `:fetch` | Alias for Force Refresh. |
 
 ---
