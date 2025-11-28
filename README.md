@@ -16,7 +16,8 @@ Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI fram
 *   **Multi-Deployment Support:** Monitor multiple deployments simultaneously with stable, flicker-free UI.
 *   **Smart Status Detection:** Accurately distinguishes between `Running`, `ContainerCreating`, and `Terminating` states, handling complex edge cases where Kubernetes reports "Waiting" for fully Ready pods.
 *   **Split-Screen UI:** Browse resources on the left (35% width), view live details (YAML/Logs/Events) on the right.
-*   **Quick Action Shortcuts:** Lightning-fast operations with `rr` (restart), `s` (scale), `R` (rollback), `+` (add), `rm` (remove).
+*   **Quick Action Shortcuts:** Lightning-fast operations with `rr` (restart), `s` (scale), `R` (rollback), `+` (add), `-` (remove).
+*   **LSP-like Autocomplete:** Intelligent deployment suggestions with real-time filtering for add/remove operations.
 *   **Command Mode (`:`):** Vim-style command bar to Scale, Restart, Rollback, Add, and Remove deployments directly from the plugin.
 *   **Tabbed Interface:** Toggle between Configuration (YAML) and Live Data (Logs/Events) with a single key.
 *   **Robust & Fast:** Includes strict timeouts (2s) on API calls to prevent UI freezing and "Smart Truncation" to handle long resource names on smaller screens.
@@ -102,8 +103,8 @@ If you prefer to compile it yourself:
 | **rr** | Global | **Restart Deployment**: Double-tap 'r' to instantly restart the current deployment. |
 | **s** | Global | **Scale Deployment**: Opens prompt to enter replica count. |
 | **R** | Global | **Rollback Deployment**: Opens prompt to enter revision number (requires Helm release). |
-| **+** | Global | **Add Deployment**: Opens prompt to add another deployment to monitor. |
-| **rm** | Global | **Remove Deployment**: Press 'r' then 'm' to remove deployment from monitoring. |
+| **+** | Global | **Add Deployment**: Opens LSP-like autocomplete with available cluster deployments (excludes monitored ones). |
+| **-** | Global | **Remove Deployment**: Opens LSP-like autocomplete with currently monitored deployments to remove. |
 
 ### Command Mode (`:`)
 
@@ -117,6 +118,33 @@ Press `:` to focus the command bar at the bottom. Type your command and press En
 | **Add** | `:add <name>` | Adds another deployment to monitor (e.g., `:add web-frontend`). |
 | **Remove** | `:remove <name>` | Removes a deployment from monitoring (e.g., `:remove web-frontend`). |
 | **Fetch** | `:fetch` | Alias for Force Refresh. |
+
+---
+
+## 🔍 LSP-like Autocomplete
+
+K9s Deck includes intelligent autocomplete functionality for deployment management:
+
+### Add Deployment (`+`)
+- **Smart Filtering**: Shows only deployments available in the cluster that aren't already being monitored
+- **Real-time Search**: Type to filter deployments by name (case-insensitive)
+- **Keyboard Navigation**: Use ↑↓ arrows to navigate through suggestions
+- **Tab Completion**: Press Tab to auto-complete with the selected deployment
+- **Visual Feedback**: Selected suggestion is highlighted with ▶ and colored text
+
+### Remove Deployment (`-`)
+- **Context-Aware**: Shows only deployments currently being monitored
+- **Same UX**: Identical keyboard navigation and completion as add mode
+- **Safety**: Can't remove deployments that aren't being monitored
+
+### Navigation Keys
+| Key | Action |
+| :--- | :--- |
+| **Type** | Filter suggestions by name |
+| **↑ / ↓** | Navigate through suggestions |
+| **Tab** | Complete with selected suggestion |
+| **Enter** | Add/Remove the selected or typed deployment |
+| **Esc** | Cancel and return to normal mode |
 
 ---
 
