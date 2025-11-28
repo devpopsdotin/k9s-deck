@@ -86,6 +86,11 @@ type model struct {
 	activeFilter string       
 	filterRegex  *regexp.Regexp 
 	
+	// LSP-like autocomplete
+	suggestions     []string      // Available deployment names for autocomplete
+	suggestionIndex int          // Currently selected suggestion
+	showSuggestions bool         // Whether to show autocomplete suggestions
+	
 	viewport    viewport.Model
 	rawContent  string        
 	ready       bool
@@ -114,6 +119,9 @@ type addTargetMsg struct {
 }
 type removeTargetMsg struct {
 	name string
+}
+type suggestionsMsg struct {
+	deployments []string
 }
 
 // --- MAIN ---
@@ -205,6 +213,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 		}
 		return m, fetchDataCmd(m.targets, m.selectors)
+
+	case suggestionsMsg:
+		// Update available deployment suggestions (only for add mode)
+		if m.shortcutMode == "add" {
+			// Filter out already monitored deployments immediately
+			var filtered []string
+			for _, deployment := range msg.deployments {
+				alreadyMonitored := false
+				for _, target := range m.targets {
+					if target == deployment {
+						alreadyMonitored = true
+						break
+					}
+				}
+				if !alreadyMonitored {
+					filtered = append(filtered, deployment)
+				}
+			}
+			m.suggestions = filtered
+			m.updateSuggestions()
+		}
+		// For remove mode, suggestions are already populated with current targets
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -301,6 +332,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
+			case "tab":
+				// Tab completes with selected suggestion for add/remove mode
+				if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions && len(m.suggestions) > 0 {
+					selectedSuggestion := m.suggestions[m.suggestionIndex]
+					m.textInput.SetValue(selectedSuggestion)
+					m.showSuggestions = false
+					return m, textinput.Blink
+				}
+			case "up":
+				// Navigate up in suggestions for add/remove mode
+				if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions && len(m.suggestions) > 0 {
+					if m.suggestionIndex > 0 {
+						m.suggestionIndex--
+					} else {
+						m.suggestionIndex = len(m.suggestions) - 1
+					}
+					return m, nil
+				}
+			case "down":
+				// Navigate down in suggestions for add/remove mode
+				if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions && len(m.suggestions) > 0 {
+					if m.suggestionIndex < len(m.suggestions)-1 {
+						m.suggestionIndex++
+					} else {
+						m.suggestionIndex = 0
+					}
+					return m, nil
+				}
 			case "enter":
 				val := m.textInput.Value()
 				m.inputMode = false
@@ -474,10 +533,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.shortcutMode = ""
 				m.textInput.Blur()
 				m.textInput.Reset()
+				// Reset autocomplete state
+				m.showSuggestions = false
+				m.suggestions = []string{}
+				m.suggestionIndex = 0
 				return m, nil
 			}
 		}
+		// Store old value to detect changes
+		oldValue := m.textInput.Value()
 		m.textInput, cmd = m.textInput.Update(msg)
+		
+		// If text changed in add/remove mode, update suggestions
+		if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.textInput.Value() != oldValue {
+			m.updateSuggestions()
+		}
+		
 		return m, cmd
 	}
 
@@ -526,23 +597,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, executeCommand("restart", helmRelease, deploymentName))
 				}
 			} else {
-				// Start of 'r' sequence - could be 'rr' (restart) or 'rm' (remove)
+				// Start of 'r' sequence for 'rr' (restart)
 				m.partialKey = "r"
 			}
 
-		case "m":
-			if m.partialKey == "r" {
-				// Complete 'rm' sequence - remove shortcut
-				m.partialKey = ""
-				m.inputMode = true
-				m.filterMode = false
-				m.shortcutMode = "remove"
-				m.textInput.Prompt = "Remove deployment: "
-				m.textInput.Placeholder = "Deployment name (empty for current)"
-				m.textInput.Reset()
-				m.textInput.Focus()
-				return m, textinput.Blink
-			}
+		case "-":
+			// Remove shortcut with autocomplete - show currently monitored deployments
+			m.partialKey = "" // Clear any partial key
+			m.inputMode = true
+			m.filterMode = false
+			m.shortcutMode = "remove"
+			m.textInput.Prompt = "Remove deployment: "
+			m.textInput.Placeholder = "Select deployment to remove..."
+			m.textInput.Reset()
+			m.textInput.Focus()
+			// Reset suggestions state and populate with current targets
+			m.suggestions = make([]string, len(m.targets))
+			copy(m.suggestions, m.targets)
+			m.suggestionIndex = 0
+			m.showSuggestions = len(m.suggestions) > 0
+			return m, textinput.Blink
 
 		case "R":
 			// Rollback shortcut (capital R) - prompt for revision
@@ -569,16 +643,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 
 		case "+":
-			// Add shortcut - prompt for deployment name
+			// Add shortcut - prompt for deployment name with autocomplete
 			m.partialKey = "" // Clear any partial key
 			m.inputMode = true
 			m.filterMode = false
 			m.shortcutMode = "add"
 			m.textInput.Prompt = "Add deployment: "
-			m.textInput.Placeholder = "Deployment name"
+			m.textInput.Placeholder = "Type to search deployments..."
 			m.textInput.Reset()
 			m.textInput.Focus()
-			return m, textinput.Blink
+			// Reset suggestions state
+			m.suggestions = []string{}
+			m.suggestionIndex = 0
+			m.showSuggestions = false
+			// Fetch available deployments for autocomplete
+			return m, tea.Batch(textinput.Blink, fetchAvailableDeployments())
 
 		case "1", "2", "3", "4", "5":
 			m.partialKey = "" // Clear any partial key
@@ -818,9 +897,42 @@ func (m model) View() string {
 
 	var footer string
 	if m.inputMode {
-		footer = styleCmdBar.Width(m.width).Render(m.textInput.View())
+		inputView := m.textInput.View()
+		
+		// Show suggestions for add/remove mode
+		if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions {
+			suggestions := m.getFilteredSuggestions()
+			if len(suggestions) > 0 {
+				var suggestionLines []string
+				for i, suggestion := range suggestions {
+					prefix := "  "
+					if i == m.suggestionIndex {
+						prefix = "▶ " // highlight selected suggestion
+						suggestion = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true).Render(suggestion)
+					} else {
+						suggestion = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(suggestion)
+					}
+					suggestionLines = append(suggestionLines, prefix+suggestion)
+				}
+				
+				suggestionsView := lipgloss.JoinVertical(lipgloss.Left, suggestionLines...)
+				action := "Add"
+				if m.shortcutMode == "remove" {
+					action = "Remove"
+				}
+				helpLine := styleDim.Render(fmt.Sprintf(" [Tab] Complete  [↑↓] Navigate  [Enter] %s  [Esc] Cancel", action))
+				footer = lipgloss.JoinVertical(lipgloss.Left, 
+					styleCmdBar.Width(m.width).Render(inputView),
+					suggestionsView,
+					helpLine)
+			} else {
+				footer = styleCmdBar.Width(m.width).Render(inputView)
+			}
+		} else {
+			footer = styleCmdBar.Width(m.width).Render(inputView)
+		}
 	} else {
-		hint := " [:] Cmds  [/] Filter  [Tab] View  [Ctrl-F] Refresh  [rr] Restart  [s] Scale  [R] Rollback  [+] Add  [rm] Remove  [q] Quit"
+		hint := " [:] Cmds  [/] Filter  [Tab] View  [Ctrl-F] Refresh  [rr] Restart  [s] Scale  [R] Rollback  [+] Add  [-] Remove  [q] Quit"
 		if m.activeFilter != "" {
 			hint = fmt.Sprintf(" FILTER: \"%s\" (Esc to clear) | %s", m.activeFilter, hint)
 		}
@@ -835,6 +947,19 @@ func runCmd(name string, args ...string) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
+}
+
+// fetchAvailableDeployments gets all deployments in the current namespace
+func fetchAvailableDeployments() tea.Cmd {
+	return func() tea.Msg {
+		out, err := runCmd("kubectl", "get", "deployments", "-n", Namespace, "--context", Context, "-o", "jsonpath={.items[*].metadata.name}")
+		if err != nil {
+			return suggestionsMsg{deployments: []string{}}
+		}
+		
+		deployments := strings.Fields(strings.TrimSpace(string(out)))
+		return suggestionsMsg{deployments: deployments}
+	}
 }
 
 func tickCmd() tea.Cmd {
@@ -1167,4 +1292,59 @@ func isValidK8sName(name string) bool {
 		}
 	}
 	return true
+}
+
+// updateSuggestions filters the available suggestions based on current input
+func (m *model) updateSuggestions() {
+	if (m.shortcutMode != "add" && m.shortcutMode != "remove") || len(m.suggestions) == 0 {
+		m.showSuggestions = false
+		return
+	}
+	
+	input := strings.ToLower(strings.TrimSpace(m.textInput.Value()))
+	if input == "" {
+		m.showSuggestions = true
+		m.suggestionIndex = 0
+		return
+	}
+	
+	// Filter suggestions that contain the input
+	var filtered []string
+	for _, suggestion := range m.suggestions {
+		if strings.Contains(strings.ToLower(suggestion), input) {
+			if m.shortcutMode == "add" {
+				// For add mode: Don't suggest deployments already being monitored
+				alreadyMonitored := false
+				for _, target := range m.targets {
+					if target == suggestion {
+						alreadyMonitored = true
+						break
+					}
+				}
+				if !alreadyMonitored {
+					filtered = append(filtered, suggestion)
+				}
+			} else if m.shortcutMode == "remove" {
+				// For remove mode: Only suggest currently monitored deployments
+				filtered = append(filtered, suggestion)
+			}
+		}
+	}
+	
+	m.suggestions = filtered
+	m.showSuggestions = len(filtered) > 0
+	m.suggestionIndex = 0
+}
+
+// getFilteredSuggestions returns suggestions for display (limited to first 5)
+func (m *model) getFilteredSuggestions() []string {
+	if !m.showSuggestions || len(m.suggestions) == 0 {
+		return []string{}
+	}
+	
+	maxSuggestions := 5
+	if len(m.suggestions) <= maxSuggestions {
+		return m.suggestions
+	}
+	return m.suggestions[:maxSuggestions]
 }
