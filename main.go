@@ -30,6 +30,38 @@ var (
 	Deployment string
 )
 
+// --- CONSTANTS ---
+const (
+	// Timing
+	RefreshInterval      = 1 * time.Second
+	CommandTimeout       = 2 * time.Second
+	LongCommandTimeout   = 5 * time.Second
+	TickerInterval       = 1 * time.Second
+
+	// UI Layout
+	LeftPaneWidthRatio   = 0.35
+	MinLeftPaneWidth     = 20
+	MinWrapWidth         = 10
+	HeaderHeight         = 3
+	FooterHeight         = 1
+	UILayoutPadding      = 2
+
+	// Logging
+	DefaultLogTailLines  = 200
+	DeploymentLogTail    = 100
+
+	// List Display
+	DefaultListHeight    = 20
+	MaxSuggestions       = 5
+
+	// Validation
+	MaxK8sNameLength     = 253
+
+	// Tabs
+	DeploymentTabCount   = 3
+	PodTabCount          = 2
+)
+
 // --- STYLES ---
 var (
 	cPrimary   = lipgloss.Color("62")  // Purple/Blue
@@ -159,7 +191,7 @@ func initialModel() model {
 	return model{
 		textInput:  ti,
 		inputMode:  false,
-		listHeight: 20,
+		listHeight: DefaultListHeight,
 		targets:    []string{Deployment},
 		selectors:  make(map[string]string),
 		helmReleases: make(map[string]string),
@@ -168,6 +200,45 @@ func initialModel() model {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(fetchDataCmd(m.targets, m.selectors), tickCmd(), textinput.Blink)
+}
+
+// copySelectorMap creates a copy of selectors map to avoid concurrent access issues
+func copySelectorMap(selectors map[string]string) map[string]string {
+	copied := make(map[string]string, len(selectors))
+	for k, v := range selectors {
+		copied[k] = v
+	}
+	return copied
+}
+
+// ensureCursorInBounds ensures cursor is within valid range of items
+func ensureCursorInBounds(cursor, itemCount int) int {
+	if itemCount == 0 {
+		return 0
+	}
+	if cursor < 0 {
+		return 0
+	}
+	if cursor >= itemCount {
+		return itemCount - 1
+	}
+	return cursor
+}
+
+// maxInt returns the larger of two integers
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// minInt returns the smaller of two integers
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // --- UPDATE ---
@@ -238,28 +309,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		
-		headerHeight := 3 
-		footerHeight := 1
-		m.listHeight = msg.Height - headerHeight - footerHeight - 2
-		if m.listHeight < 1 { m.listHeight = 1 }
+		m.width = maxInt(msg.Width, 0)
+		m.height = maxInt(msg.Height, 0)
 
-		paneWidth := int(float64(msg.Width) * 0.35) 
-		vpWidth := msg.Width - paneWidth - 4
-		if vpWidth < 0 { vpWidth = 0 }
-		vpHeight := msg.Height - headerHeight - footerHeight - 2 
-		if vpHeight < 0 { vpHeight = 0 }
-		
+		m.listHeight = maxInt(msg.Height - HeaderHeight - FooterHeight - UILayoutPadding, 1)
+
+		paneWidth := maxInt(int(float64(msg.Width) * LeftPaneWidthRatio), 0)
+		vpWidth := maxInt(msg.Width - paneWidth - 4, 0)
+		vpHeight := maxInt(msg.Height - HeaderHeight - FooterHeight - UILayoutPadding, 0)
+
 		if !m.ready {
 			m.viewport = viewport.New(vpWidth, vpHeight)
-			m.viewport.YPosition = headerHeight + 1
+			m.viewport.YPosition = HeaderHeight + 1
 			m.ready = true
 		} else {
 			m.viewport.Width = vpWidth
 			m.viewport.Height = vpHeight
-			m.updateViewportContent() 
+			m.updateViewportContent()
 		}
 		return m, nil
 
@@ -269,18 +335,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		} else {
 			m.err = nil
-			
+
 			// Remember current selection before updating items
 			var currentSelection *item
 			if len(m.items) > 0 && m.cursor < len(m.items) {
 				currentSelection = &m.items[m.cursor]
 			}
-			
+
 			m.items = msg.items
 			// Merge maps
 			for k, v := range msg.selectors { m.selectors[k] = v }
 			for k, v := range msg.helmReleases { m.helmReleases[k] = v }
-			
+
 			// Try to restore cursor to the same item
 			if currentSelection != nil && len(m.items) > 0 {
 				newCursor := -1
@@ -294,21 +360,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = newCursor
 				} else {
 					// Item not found, validate bounds
-					if m.cursor >= len(m.items) {
-						m.cursor = len(m.items) - 1
-					}
+					m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
 				}
 			} else {
 				// Validate cursor position for new or empty selections
-				if len(m.items) > 0 && m.cursor >= len(m.items) {
-					m.cursor = len(m.items) - 1
-					if m.cursor < 0 { m.cursor = 0 }
-				}
+				m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
 			}
-			
-			// Always refresh details
+
+			// Always refresh details - pass a copy of selectors to avoid race
 			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.selectors))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -429,21 +490,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, func() tea.Msg { return addTargetMsg{name: val} }
 					case "remove":
+						if len(m.targets) <= 1 {
+							m.rawContent = "Cannot remove the last deployment target"
+							m.updateViewportContent()
+							return m, nil
+						}
 						if val == "" {
 							// Use current deployment
-							if len(m.items) > 0 {
-								curr := m.items[m.cursor]
-								if curr.Type == "DEP" {
-									val = curr.Name
-								} else {
-									for i := m.cursor; i >= 0; i-- {
-										if m.items[i].Type == "DEP" {
-											val = m.items[i].Name
-											break
-										}
-									}
-								}
-							}
+							val = getCurrentDeploymentName(m.items, m.cursor)
 						}
 						if val != "" {
 							return m, func() tea.Msg { return removeTargetMsg{name: val} }
@@ -463,20 +517,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							targetToRemove = parts[1]
 						} else {
 							// If no name specified, try to remove current deployment
-							if len(m.items) > 0 {
-								curr := m.items[m.cursor]
-								if curr.Type == "DEP" {
-									targetToRemove = curr.Name
-								} else {
-									// Find the deployment this resource belongs to
-									for i := m.cursor; i >= 0; i-- {
-										if m.items[i].Type == "DEP" {
-											targetToRemove = m.items[i].Name
-											break
-										}
-									}
-								}
-							}
+							targetToRemove = getCurrentDeploymentName(m.items, m.cursor)
 							if targetToRemove == "" {
 								m.rawContent = "Usage: remove <deployment_name> or select a deployment first"
 								m.updateViewportContent()
@@ -505,24 +546,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					
 					// Find the helm release for current deployment context
-					helmRelease := ""
-					deploymentName := ""
-					if len(m.items) > 0 {
-						curr := m.items[m.cursor]
-						if curr.Type == "DEP" {
-							deploymentName = curr.Name
-							helmRelease = m.helmReleases[curr.Name]
-						} else {
-							// Find the deployment this resource belongs to
-							for i := m.cursor; i >= 0; i-- {
-								if m.items[i].Type == "DEP" {
-									deploymentName = m.items[i].Name
-									helmRelease = m.helmReleases[m.items[i].Name]
-									break
-								}
-							}
-						}
-					}
+					deploymentName := getCurrentDeploymentName(m.items, m.cursor)
+					helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.helmReleases)
 					cmds = append(cmds, executeCommand(val, helmRelease, deploymentName))
 				}
 				return m, tea.Batch(cmds...)
@@ -705,7 +730,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Refresh details
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.selectors))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
 			}
 
 		case "up", "k":
@@ -713,14 +738,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor--
 				if m.cursor < m.listOffset { m.listOffset = m.cursor }
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.selectors))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
 			}
 		case "down", "j":
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				if m.cursor >= m.listOffset + m.listHeight { m.listOffset++ }
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.selectors))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
 			}
 
 		case "tab":
@@ -728,21 +753,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				curr := m.items[m.cursor]
 				if curr.Type == "DEP" {
 					// Cycle 0 (YAML) -> 1 (Events) -> 2 (Logs) -> 0
-					m.activeTab = (m.activeTab + 1) % 3
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, m.selectors))
+					m.activeTab = (m.activeTab + 1) % DeploymentTabCount
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors)))
 				} else if curr.Type == "POD" {
-					m.activeTab = (m.activeTab + 1) % 2
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, m.selectors))
+					m.activeTab = (m.activeTab + 1) % PodTabCount
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors)))
 				} else {
 					// Reset tab for other resource types
 					m.activeTab = 0
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, m.selectors))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors)))
 				}
 			}
 
 		case "enter":
 			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.selectors))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
 			}
 			
 		default:
@@ -758,15 +783,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) updateViewportContent() {
 	content := strings.ReplaceAll(m.rawContent, "\r\n", "\n")
-	
+
 	if m.activeFilter != "" {
 		lines := strings.Split(content, "\n")
-		var filtered []string
-		
+		filtered := make([]string, 0, len(lines)/10) // Estimate ~10% match rate
+
 		re := m.filterRegex
 		if re == nil {
+			// Compile and cache the regex
 			r, err := regexp.Compile("(?i)" + regexp.QuoteMeta(m.activeFilter))
-			if err == nil { re = r }
+			if err == nil {
+				re = r
+				m.filterRegex = r  // Cache for future calls
+			}
 		}
 
 		for _, line := range lines {
@@ -777,7 +806,7 @@ func (m *model) updateViewportContent() {
 				filtered = append(filtered, highlighted)
 			}
 		}
-		
+
 		if len(filtered) == 0 {
 			content = "No results found for filter: " + m.activeFilter
 		} else {
@@ -786,7 +815,7 @@ func (m *model) updateViewportContent() {
 	}
 	
 	wrapWidth := m.viewport.Width - 2
-	if wrapWidth < 10 { wrapWidth = 10 }
+	if wrapWidth < MinWrapWidth { wrapWidth = MinWrapWidth }
 	wrapper := lipgloss.NewStyle().Width(wrapWidth)
 	m.viewport.SetContent(wrapper.Render(content))
 }
@@ -794,8 +823,8 @@ func (m *model) updateViewportContent() {
 func (m model) View() string {
 	if !m.ready { return "Initializing..." }
 
-	leftWidth := int(float64(m.width) * 0.35)
-	if leftWidth < 20 { leftWidth = 20 }
+	leftWidth := int(float64(m.width) * LeftPaneWidthRatio)
+	if leftWidth < MinLeftPaneWidth { leftWidth = MinLeftPaneWidth }
 	
 	var listItems []string
 	// Header Title
@@ -943,7 +972,7 @@ func (m model) View() string {
 }
 
 func runCmd(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
@@ -963,7 +992,7 @@ func fetchAvailableDeployments() tea.Cmd {
 }
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Tick(TickerInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
@@ -971,11 +1000,11 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 		parts := strings.Fields(input)
 		if len(parts) == 0 { return nil }
 		verb := parts[0]
-		
+
 		// :add is handled in Update now via addTargetMsg
-		
+
 		var cmd *exec.Cmd
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), LongCommandTimeout)
 		defer cancel()
 
 		switch verb {
@@ -1105,7 +1134,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 				keys := make([]string, 0, len(selectorMap))
 				for k := range selectorMap { keys = append(keys, k) }
 				sort.Strings(keys)
-				var labels []string
+				labels := make([]string, 0, len(keys))
 				for _, k := range keys { labels = append(labels, k+"="+selectorMap[k].String()) }
 				newSelector := strings.Join(labels, ",")
 				
@@ -1201,14 +1230,14 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string) tea.Cmd {
 				}
 				
 				// Get logs from all pods using cached label selector
-				out, err = runCmd("kubectl", "logs", "-l", selector, "-n", Namespace, "--context", Context, "--all-containers=true", "--prefix", "--tail=100")
+				out, err = runCmd("kubectl", "logs", "-l", selector, "-n", Namespace, "--context", Context, "--all-containers=true", "--prefix", fmt.Sprintf("--tail=%d", DeploymentLogTail))
 				if err != nil { return detailsMsg{err: fmt.Errorf("Logs Err: %v", err)} }
 				return detailsMsg{content: string(out), isYaml: false}
 			}
 		}
 
 		if i.Type == "POD" && tab == 1 {
-			out, err = runCmd("kubectl", "logs", i.Name, "-n", Namespace, "--context", Context, "--tail=200", "--all-containers=true")
+			out, err = runCmd("kubectl", "logs", i.Name, "-n", Namespace, "--context", Context, fmt.Sprintf("--tail=%d", DefaultLogTailLines), "--all-containers=true")
 			if err != nil { return detailsMsg{err: fmt.Errorf("%v: %s", err, string(out))} }
 			return detailsMsg{content: string(out), isYaml: false}
 		}
@@ -1268,6 +1297,8 @@ func getCurrentHelmRelease(items []item, cursor int, helmReleases map[string]str
 	return helmReleases[deploymentName]
 }
 
+// --- VALIDATION HELPERS ---
+
 func isPositiveInteger(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "0" { return false }
@@ -1278,7 +1309,7 @@ func isPositiveInteger(s string) bool {
 }
 
 func isValidK8sName(name string) bool {
-	if name == "" || len(name) > 253 {
+	if name == "" || len(name) > MaxK8sNameLength {
 		return false
 	}
 	// K8s names must be lowercase alphanumeric with hyphens
@@ -1309,19 +1340,19 @@ func (m *model) updateSuggestions() {
 	}
 	
 	// Filter suggestions that contain the input
-	var filtered []string
+	filtered := make([]string, 0, len(m.suggestions))
+
+	// Build a map of targets for O(1) lookup instead of O(n)
+	targetMap := make(map[string]bool, len(m.targets))
+	for _, target := range m.targets {
+		targetMap[target] = true
+	}
+
 	for _, suggestion := range m.suggestions {
 		if strings.Contains(strings.ToLower(suggestion), input) {
 			if m.shortcutMode == "add" {
 				// For add mode: Don't suggest deployments already being monitored
-				alreadyMonitored := false
-				for _, target := range m.targets {
-					if target == suggestion {
-						alreadyMonitored = true
-						break
-					}
-				}
-				if !alreadyMonitored {
+				if !targetMap[suggestion] {
 					filtered = append(filtered, suggestion)
 				}
 			} else if m.shortcutMode == "remove" {
@@ -1336,15 +1367,14 @@ func (m *model) updateSuggestions() {
 	m.suggestionIndex = 0
 }
 
-// getFilteredSuggestions returns suggestions for display (limited to first 5)
+// getFilteredSuggestions returns suggestions for display (limited to MaxSuggestions)
 func (m *model) getFilteredSuggestions() []string {
 	if !m.showSuggestions || len(m.suggestions) == 0 {
 		return []string{}
 	}
-	
-	maxSuggestions := 5
-	if len(m.suggestions) <= maxSuggestions {
+
+	if len(m.suggestions) <= MaxSuggestions {
 		return m.suggestions
 	}
-	return m.suggestions[:maxSuggestions]
+	return m.suggestions[:MaxSuggestions]
 }
