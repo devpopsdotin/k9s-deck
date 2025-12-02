@@ -1,7 +1,9 @@
 
-# K9s Deck (v1.5.0)
+# K9s Deck (v2.0.0)
 
 **K9s Deck** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
+
+**v2.0.0** features a complete architectural refactoring with modular packages, comprehensive testing (32 unit tests), and thread-safe concurrent operations.
 
 Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI framework.
 
@@ -233,3 +235,73 @@ Calls to `kubectl` are wrapped in a 2-second timeout. If your cluster is unrespo
 
 **3. "Unknown Command" in text input**
 Ensure you are typing the command exactly as listed (e.g., `scale 1`, not `scale=1`).
+
+---
+
+## 🔧 Development
+
+### Architecture (v2.0.0+)
+
+K9s Deck uses a modular architecture with clear separation of concerns:
+
+```
+k9s-deck/
+├── main.go                        # Entry point & Bubble Tea UI
+├── internal/
+│   ├── logger/                    # Structured logging (slog)
+│   ├── parser/                    # Log parsing & syntax highlighting
+│   ├── k8s/                       # Kubernetes operations (kubectl/helm)
+│   ├── state/                     # Thread-safe state management
+│   └── ui/                        # UI components & styles
+└── testdata/                      # Test fixtures
+```
+
+### Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/devpopsdotin/k9s-deck.git
+cd k9s-deck
+
+# Build
+go build .
+
+# Run tests
+go test ./...
+
+# Run tests with race detector
+go test -race ./...
+```
+
+### Testing
+
+Comprehensive test suite with 32 unit tests:
+
+```bash
+go test ./...                    # Run all tests
+go test -v ./internal/parser     # Parser tests (7 tests)
+go test -v ./internal/k8s        # K8s tests (14 tests)
+go test -v ./internal/state      # State tests (11 tests, race-free)
+go test -race ./...              # Run with race detector
+```
+
+### Logging
+
+Application logs are written to `/tmp/k9s-deck.log` in structured JSON format:
+
+```bash
+tail -f /tmp/k9s-deck.log        # Monitor logs
+```
+
+Set log level via environment variable:
+```bash
+export K9S_DECK_LOG_LEVEL=DEBUG  # DEBUG, INFO, WARN, ERROR
+```
+
+### Key Improvements in v2.0.0
+
+- ✅ **Modular architecture** - 6 organized packages
+- ✅ **Thread-safe** - Fixed race condition with StateManager
+- ✅ **Tested** - 32 unit tests, 0 races detected
+- ✅ **Observable** - Structured logging with slog
+- ✅ **Maintainable** - Clear separation of concerns
