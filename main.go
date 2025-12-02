@@ -50,6 +50,11 @@ const (
 	DefaultLogTailLines  = 200
 	DeploymentLogTail    = 100
 
+	// Log Formatting
+	PodPrefixSuffixLen   = 7
+	MaxPodPrefixDisplay  = 20
+	JSONIndent           = 2
+
 	// List Display
 	DefaultListHeight    = 20
 	MaxSuggestions       = 5
@@ -71,6 +76,20 @@ var (
 	cYellow    = lipgloss.Color("220") // Yellow
 	cGray      = lipgloss.Color("240") // Gray
 
+	// Pod color palette for log prefixes
+	podColorPalette = []lipgloss.Color{
+		lipgloss.Color("39"),  // Cyan
+		lipgloss.Color("42"),  // Green
+		lipgloss.Color("220"), // Yellow
+		lipgloss.Color("201"), // Magenta
+		lipgloss.Color("141"), // Purple
+		lipgloss.Color("208"), // Orange
+		lipgloss.Color("51"),  // Light Blue
+		lipgloss.Color("82"),  // Light Green
+		lipgloss.Color("213"), // Pink
+		lipgloss.Color("228"), // Light Yellow
+	}
+
 	styleBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(cGray)
 	stylePane   = lipgloss.NewStyle().Padding(0, 1)
 	styleTitle    = lipgloss.NewStyle().Foreground(cSecondary).Bold(true)
@@ -87,6 +106,12 @@ var (
 	styleHighlight = lipgloss.NewStyle().Background(lipgloss.Color("201")).Foreground(lipgloss.Color("255")).Bold(true)
 )
 
+// --- LOG PARSING ---
+var (
+	logLevelRegex  = regexp.MustCompile(`(?i)\b(FATAL|ERROR|ERR|WARN|WARNING|INFO|DEBUG|TRACE)\b`)
+	podPrefixRegex = regexp.MustCompile(`^\[([^/]+)/([^\]]+)\]\s*(.*)$`)
+)
+
 func init() {
 	_ = styles.Get("dracula")
 }
@@ -96,6 +121,21 @@ type item struct {
 	Type   string // DEP, POD, HELM, SEC, CM, HDR
 	Name   string
 	Status string
+}
+
+type logLineInfo struct {
+	OriginalLine  string
+	PodPrefix     string // e.g., "nginx-deployment-5c7588df-abc123/nginx"
+	PodName       string
+	ContainerName string
+	LogContent    string
+	LogLevel      string // ERROR, WARN, INFO, DEBUG, etc.
+	IsJSON        bool
+}
+
+type multiContainerCache struct {
+	mu    sync.RWMutex
+	cache map[string]bool // podName -> hasMultipleContainers
 }
 
 type model struct {
@@ -124,12 +164,16 @@ type model struct {
 	showSuggestions bool         // Whether to show autocomplete suggestions
 	
 	viewport    viewport.Model
-	rawContent  string        
+	rawContent  string
 	ready       bool
 	width       int
 	height      int
 	lastUpd     time.Time
 	err         error
+
+	// Log formatting
+	logFormatMode      bool                  // true=formatted, false=raw
+	multiContainerInfo *multiContainerCache  // cache for multi-container detection
 }
 
 // --- MESSAGES ---
@@ -189,12 +233,16 @@ func initialModel() model {
 
 	// Initialize targets with the starting deployment
 	return model{
-		textInput:  ti,
-		inputMode:  false,
-		listHeight: DefaultListHeight,
-		targets:    []string{Deployment},
-		selectors:  make(map[string]string),
+		textInput:    ti,
+		inputMode:    false,
+		listHeight:   DefaultListHeight,
+		targets:      []string{Deployment},
+		selectors:    make(map[string]string),
 		helmReleases: make(map[string]string),
+		logFormatMode: true, // Default to formatted
+		multiContainerInfo: &multiContainerCache{
+			cache: make(map[string]bool),
+		},
 	}
 }
 
@@ -369,7 +417,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Always refresh details - pass a copy of selectors to avoid race
 			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -381,7 +429,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.isYaml {
 				m.rawContent = highlight(msg.content, "yaml")
 			} else {
-				m.rawContent = msg.content
+				// Determine if this is log content
+				currentItem := item{}
+				if len(m.items) > 0 && m.cursor < len(m.items) {
+					currentItem = m.items[m.cursor]
+				}
+
+				isLogContent := (currentItem.Type == "DEP" && m.activeTab == 2) ||
+					(currentItem.Type == "POD" && m.activeTab == 1)
+
+				if isLogContent {
+					m.rawContent = processLogContent(msg.content, currentItem.Type,
+						currentItem.Name, m.logFormatMode)
+				} else {
+					m.rawContent = msg.content
+				}
 			}
 		}
 		m.updateViewportContent()
@@ -612,6 +674,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+f":
 			cmds = append(cmds, fetchDataCmd(m.targets, m.selectors))
 
+		case "f":
+			// Toggle log format mode
+			m.partialKey = ""
+			m.logFormatMode = !m.logFormatMode
+			m.updateViewportContent()
+			return m, nil
+
 		case "r":
 			if m.partialKey == "r" {
 				// Double 'r' - execute restart immediately
@@ -730,7 +799,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Refresh details
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
 
 		case "up", "k":
@@ -738,14 +807,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor--
 				if m.cursor < m.listOffset { m.listOffset = m.cursor }
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
 		case "down", "j":
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				if m.cursor >= m.listOffset + m.listHeight { m.listOffset++ }
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
 
 		case "tab":
@@ -754,22 +823,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if curr.Type == "DEP" {
 					// Cycle 0 (YAML) -> 1 (Events) -> 2 (Logs) -> 0
 					m.activeTab = (m.activeTab + 1) % DeploymentTabCount
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors)))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 				} else if curr.Type == "POD" {
 					m.activeTab = (m.activeTab + 1) % PodTabCount
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors)))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 				} else {
 					// Reset tab for other resource types
 					m.activeTab = 0
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors)))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 				}
 			}
 
 		case "enter":
 			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors)))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
-			
+
+		// Viewport scrolling keybindings
+		case "ctrl+d":
+			// Scroll viewport down half page (vim-style)
+			m.viewport.HalfViewDown()
+		case "ctrl+u":
+			// Scroll viewport up half page (vim-style)
+			m.viewport.HalfViewUp()
+		case "ctrl+e":
+			// Scroll viewport down one line (vim-style)
+			m.viewport.LineDown(1)
+		case "ctrl+y":
+			// Scroll viewport up one line (vim-style)
+			m.viewport.LineUp(1)
+		case "pgdown":
+			// Scroll viewport down one page
+			m.viewport.ViewDown()
+		case "pgup":
+			// Scroll viewport up one page
+			m.viewport.ViewUp()
+
 		default:
 			// Clear partial key for any unhandled input
 			m.partialKey = ""
@@ -961,7 +1050,15 @@ func (m model) View() string {
 			footer = styleCmdBar.Width(m.width).Render(inputView)
 		}
 	} else {
-		hint := " [:] Cmds  [/] Filter  [Tab] View  [Ctrl-F] Refresh  [rr] Restart  [s] Scale  [R] Rollback  [+] Add  [-] Remove  [q] Quit"
+		hint := " [:] Cmds  [/] Filter  [Tab] View  [f] Format  [Ctrl+d/u] Scroll  [Ctrl-F] Refresh  [rr] Restart  [s] Scale  [R] Rollback  [+] Add  [-] Remove  [q] Quit"
+
+		// Add format mode indicator
+		if m.logFormatMode {
+			hint += " (Formatted)"
+		} else {
+			hint += " (Raw)"
+		}
+
 		if m.activeFilter != "" {
 			hint = fmt.Sprintf(" FILTER: \"%s\" (Esc to clear) | %s", m.activeFilter, hint)
 		}
@@ -1195,7 +1292,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 	}
 }
 
-func fetchDetailsCmd(i item, tab int, selectors map[string]string) tea.Cmd {
+func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContainerInfo *multiContainerCache) tea.Cmd {
 	return func() tea.Msg {
 		var out []byte
 		var err error
@@ -1237,7 +1334,19 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string) tea.Cmd {
 		}
 
 		if i.Type == "POD" && tab == 1 {
-			out, err = runCmd("kubectl", "logs", i.Name, "-n", Namespace, "--context", Context, fmt.Sprintf("--tail=%d", DefaultLogTailLines), "--all-containers=true")
+			// Detect if pod has multiple containers
+			isMulti, detectionErr := detectMultiContainer(i.Name, multiContainerInfo)
+
+			// Build kubectl logs command
+			args := []string{"logs", i.Name, "-n", Namespace, "--context", Context,
+				fmt.Sprintf("--tail=%d", DefaultLogTailLines), "--all-containers=true"}
+
+			// Add --prefix flag only for multi-container pods
+			if detectionErr == nil && isMulti {
+				args = append(args, "--prefix")
+			}
+
+			out, err = runCmd("kubectl", args...)
 			if err != nil { return detailsMsg{err: fmt.Errorf("%v: %s", err, string(out))} }
 			return detailsMsg{content: string(out), isYaml: false}
 		}
@@ -1377,4 +1486,226 @@ func (m *model) getFilteredSuggestions() []string {
 		return m.suggestions
 	}
 	return m.suggestions[:MaxSuggestions]
+}
+
+// --- LOG PROCESSING FUNCTIONS ---
+
+// parseLogLine extracts components from a log line
+func parseLogLine(line string) logLineInfo {
+	info := logLineInfo{
+		OriginalLine: line,
+		LogContent:   line,
+	}
+
+	// Try to extract pod prefix [podname/container]
+	if matches := podPrefixRegex.FindStringSubmatch(line); len(matches) == 4 {
+		info.PodPrefix = matches[1] + "/" + matches[2]
+		info.PodName = matches[1]
+		info.ContainerName = matches[2]
+		info.LogContent = matches[3]
+	}
+
+	// Detect log level
+	if levelMatches := logLevelRegex.FindStringSubmatch(info.LogContent); len(levelMatches) > 1 {
+		info.LogLevel = strings.ToUpper(levelMatches[1])
+	}
+
+	// Detect JSON
+	trimmed := strings.TrimSpace(info.LogContent)
+	info.IsJSON = (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))
+
+	return info
+}
+
+// getPodColor returns a consistent color for a pod name using hash
+func getPodColor(podName string) lipgloss.Color {
+	hash := 0
+	for _, c := range podName {
+		hash = (hash*31 + int(c)) % len(podColorPalette)
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	return podColorPalette[hash%len(podColorPalette)]
+}
+
+// getLogLevelColor returns the color for a log level
+func getLogLevelColor(level string) lipgloss.Color {
+	normalized := strings.ToUpper(strings.TrimSpace(level))
+	switch normalized {
+	case "FATAL", "ERROR", "ERR":
+		return cRed
+	case "WARN", "WARNING":
+		return cYellow
+	case "INFO":
+		return lipgloss.Color("39") // Cyan
+	case "DEBUG":
+		return cGray
+	case "TRACE":
+		return lipgloss.Color("238") // Darker gray
+	default:
+		return lipgloss.Color("255") // Default white
+	}
+}
+
+// shortenPodPrefix shortens pod name but keeps unique suffix
+func shortenPodPrefix(podName, containerName string) string {
+	if len(podName) <= MaxPodPrefixDisplay {
+		return fmt.Sprintf("[%s/%s]", podName, containerName)
+	}
+
+	// Keep last PodPrefixSuffixLen characters (typically the ReplicaSet hash)
+	suffix := podName
+	if len(podName) > PodPrefixSuffixLen {
+		suffix = podName[len(podName)-PodPrefixSuffixLen:]
+	}
+
+	return fmt.Sprintf("[..%s/%s]", suffix, containerName)
+}
+
+// formatPodPrefix formats pod prefix with color and icon
+func formatPodPrefix(podName, containerName string) string {
+	shortened := shortenPodPrefix(podName, containerName)
+	color := getPodColor(podName)
+	icon := "●"
+
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
+	return style.Render(icon + " " + shortened)
+}
+
+// colorizeLogLevel applies color to log level keywords in a line
+func colorizeLogLevel(line string) string {
+	matches := logLevelRegex.FindAllStringIndex(line, -1)
+	if len(matches) == 0 {
+		return line
+	}
+
+	var result strings.Builder
+	lastIndex := 0
+
+	for _, match := range matches {
+		start, end := match[0], match[1]
+
+		// Write content before match
+		result.WriteString(line[lastIndex:start])
+
+		// Colorize the level
+		level := line[start:end]
+		color := getLogLevelColor(level)
+		style := lipgloss.NewStyle().Foreground(color).Bold(true)
+		result.WriteString(style.Render(level))
+
+		lastIndex = end
+	}
+
+	// Write remaining content
+	result.WriteString(line[lastIndex:])
+	return result.String()
+}
+
+// detectJSONLog checks if a line is JSON format
+func detectJSONLog(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))
+}
+
+// prettyPrintJSONLog formats and highlights JSON logs
+func prettyPrintJSONLog(line string) string {
+	// Try to parse and pretty-print JSON
+	var obj interface{}
+	if err := json.Unmarshal([]byte(line), &obj); err != nil {
+		return line // Return original if not valid JSON
+	}
+
+	pretty, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return line
+	}
+
+	// Apply Chroma syntax highlighting
+	return highlight(string(pretty), "json")
+}
+
+// detectMultiContainer checks if a pod has multiple containers (with caching)
+func detectMultiContainer(podName string, cache *multiContainerCache) (bool, error) {
+	// Check cache first
+	cache.mu.RLock()
+	if result, exists := cache.cache[podName]; exists {
+		cache.mu.RUnlock()
+		return result, nil
+	}
+	cache.mu.RUnlock()
+
+	// Query kubectl
+	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "kubectl", "get", "pod", podName,
+		"-n", Namespace, "--context", Context,
+		"-o", "jsonpath={.spec.containers[*].name}")
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+
+	containerNames := strings.Fields(string(out))
+	isMulti := len(containerNames) > 1
+
+	// Cache result
+	cache.mu.Lock()
+	cache.cache[podName] = isMulti
+	cache.mu.Unlock()
+
+	return isMulti, nil
+}
+
+// processLogContent is the master log processing function
+func processLogContent(content, resourceType, resourceName string, formatMode bool) string {
+	if !formatMode {
+		return content // Raw mode - return unchanged
+	}
+
+	lines := strings.Split(content, "\n")
+	processed := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			processed = append(processed, line)
+			continue
+		}
+
+		// Parse line structure
+		info := parseLogLine(line)
+
+		// Check if JSON
+		if detectJSONLog(info.LogContent) {
+			// Format as JSON
+			formatted := prettyPrintJSONLog(info.LogContent)
+			if info.PodPrefix != "" {
+				prefix := formatPodPrefix(info.PodName, info.ContainerName)
+				processed = append(processed, prefix+" "+formatted)
+			} else {
+				processed = append(processed, formatted)
+			}
+		} else {
+			// Standard text log with level coloring
+			formattedLine := line
+
+			// Add pod prefix formatting if present
+			if info.PodPrefix != "" {
+				prefix := formatPodPrefix(info.PodName, info.ContainerName)
+				colorizedContent := colorizeLogLevel(info.LogContent)
+				formattedLine = prefix + " " + colorizedContent
+			} else {
+				formattedLine = colorizeLogLevel(line)
+			}
+
+			processed = append(processed, formattedLine)
+		}
+	}
+
+	return strings.Join(processed, "\n")
 }
