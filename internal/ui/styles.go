@@ -9,8 +9,8 @@ import (
 // UI Layout Constants
 const (
 	// Timing
-	RefreshInterval    = 1 * time.Second
-	TickerInterval     = 1 * time.Second
+	RefreshInterval = 1 * time.Second
+	TickerInterval  = 1 * time.Second
 
 	// UI Layout
 	LeftPaneWidthRatio = 0.35

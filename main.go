@@ -22,6 +22,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tidwall/gjson"
+
+	"github.com/devpopsdotin/k9s-deck/internal/k8s"
+	"github.com/devpopsdotin/k9s-deck/internal/logger"
 )
 
 // --- CONFIG ---
@@ -29,43 +32,44 @@ var (
 	Context    string
 	Namespace  string
 	Deployment string
+	client     k8s.Client // Kubernetes client (client-go)
 )
 
 // --- CONSTANTS ---
 const (
 	// Timing
-	RefreshInterval      = 1 * time.Second
-	CommandTimeout       = 2 * time.Second
-	LongCommandTimeout   = 5 * time.Second
-	TickerInterval       = 1 * time.Second
+	RefreshInterval    = 1 * time.Second
+	CommandTimeout     = 2 * time.Second
+	LongCommandTimeout = 5 * time.Second
+	TickerInterval     = 1 * time.Second
 
 	// UI Layout
-	LeftPaneWidthRatio   = 0.35
-	MinLeftPaneWidth     = 20
-	MinWrapWidth         = 10
-	HeaderHeight         = 3
-	FooterHeight         = 1
-	UILayoutPadding      = 2
+	LeftPaneWidthRatio = 0.35
+	MinLeftPaneWidth   = 20
+	MinWrapWidth       = 10
+	HeaderHeight       = 3
+	FooterHeight       = 1
+	UILayoutPadding    = 2
 
 	// Logging
-	DefaultLogTailLines  = 200
-	DeploymentLogTail    = 100
+	DefaultLogTailLines = 200
+	DeploymentLogTail   = 100
 
 	// Log Formatting
-	PodPrefixSuffixLen   = 7
-	MaxPodPrefixDisplay  = 20
-	JSONIndent           = 2
+	PodPrefixSuffixLen  = 7
+	MaxPodPrefixDisplay = 20
+	JSONIndent          = 2
 
 	// List Display
-	DefaultListHeight    = 20
-	MaxSuggestions       = 5
+	DefaultListHeight = 20
+	MaxSuggestions    = 5
 
 	// Validation
-	MaxK8sNameLength     = 253
+	MaxK8sNameLength = 253
 
 	// Tabs
-	DeploymentTabCount   = 3
-	PodTabCount          = 2
+	DeploymentTabCount = 3
+	PodTabCount        = 2
 )
 
 // --- STYLES ---
@@ -91,19 +95,19 @@ var (
 		lipgloss.Color("228"), // Light Yellow
 	}
 
-	styleBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(cGray)
-	stylePane   = lipgloss.NewStyle().Padding(0, 1)
+	styleBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(cGray)
+	stylePane     = lipgloss.NewStyle().Padding(0, 1)
 	styleTitle    = lipgloss.NewStyle().Foreground(cSecondary).Bold(true)
 	styleSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(cPrimary).Bold(true).Padding(0, 1)
 	styleDim      = lipgloss.NewStyle().Foreground(cGray)
 	styleErr      = lipgloss.NewStyle().Foreground(cRed)
 	styleHeader   = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true).Background(lipgloss.Color("237")).Padding(0, 1).Width(100)
-	
+
 	styleTabActive   = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(cPrimary).Foreground(cPrimary).Bold(true).Padding(0, 1)
 	styleTabInactive = lipgloss.NewStyle().Padding(0, 1).Foreground(cGray)
-	
+
 	styleCmdBar = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("236")).Padding(0, 1)
-	
+
 	styleHighlight = lipgloss.NewStyle().Background(lipgloss.Color("201")).Foreground(lipgloss.Color("255")).Bold(true)
 )
 
@@ -140,41 +144,41 @@ type multiContainerCache struct {
 }
 
 type model struct {
-	items       []item
-	
-	targets     []string            // List of deployments to monitor
-	selectors   map[string]string   // Cache label selectors per deployment
-	helmReleases map[string]string  // Cache helm release names
+	items []item
 
-	cursor      int
-	listOffset  int
-	listHeight  int
+	targets      []string          // List of deployments to monitor
+	selectors    map[string]string // Cache label selectors per deployment
+	helmReleases map[string]string // Cache helm release names
 
-	activeTab    int 
+	cursor     int
+	listOffset int
+	listHeight int
+
+	activeTab    int
 	textInput    textinput.Model
 	inputMode    bool
-	filterMode   bool          
-	shortcutMode string        // "scale", "rollback", "add", "remove", or ""
-	partialKey   string        // for multi-character shortcuts like "rm"
-	activeFilter string       
-	filterRegex  *regexp.Regexp 
-	
+	filterMode   bool
+	shortcutMode string // "scale", "rollback", "add", "remove", or ""
+	partialKey   string // for multi-character shortcuts like "rm"
+	activeFilter string
+	filterRegex  *regexp.Regexp
+
 	// LSP-like autocomplete
-	suggestions     []string      // Available deployment names for autocomplete
-	suggestionIndex int          // Currently selected suggestion
-	showSuggestions bool         // Whether to show autocomplete suggestions
-	
-	viewport    viewport.Model
-	rawContent  string
-	ready       bool
-	width       int
-	height      int
-	lastUpd     time.Time
-	err         error
+	suggestions     []string // Available deployment names for autocomplete
+	suggestionIndex int      // Currently selected suggestion
+	showSuggestions bool     // Whether to show autocomplete suggestions
+
+	viewport   viewport.Model
+	rawContent string
+	ready      bool
+	width      int
+	height     int
+	lastUpd    time.Time
+	err        error
 
 	// Log formatting
-	logFormatMode      bool                  // true=formatted, false=raw
-	multiContainerInfo *multiContainerCache  // cache for multi-container detection
+	logFormatMode      bool                 // true=formatted, false=raw
+	multiContainerInfo *multiContainerCache // cache for multi-container detection
 
 	// Status messages
 	statusMsg string // temporary status message (e.g., "Copied to clipboard")
@@ -226,6 +230,20 @@ func main() {
 		Deployment = os.Args[3]
 	}
 
+	// Initialize logger (writes to /tmp/k9s-deck.log)
+	if err := logger.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize logger: %v\n", err)
+		// Continue anyway - logging is not critical
+	}
+
+	// Initialize Kubernetes client (uses client-go for performance)
+	var err error
+	client, err = k8s.NewClient(Context)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to create Kubernetes client: %v\n", err)
+		os.Exit(1)
+	}
+
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Error:", err)
@@ -242,12 +260,12 @@ func initialModel() model {
 
 	// Initialize targets with the starting deployment
 	return model{
-		textInput:    ti,
-		inputMode:    false,
-		listHeight:   DefaultListHeight,
-		targets:      []string{Deployment},
-		selectors:    make(map[string]string),
-		helmReleases: make(map[string]string),
+		textInput:     ti,
+		inputMode:     false,
+		listHeight:    DefaultListHeight,
+		targets:       []string{Deployment},
+		selectors:     make(map[string]string),
+		helmReleases:  make(map[string]string),
 		logFormatMode: true, // Default to formatted
 		multiContainerInfo: &multiContainerCache{
 			cache: make(map[string]bool),
@@ -312,12 +330,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commandFinishedMsg:
 		return m, fetchDataCmd(m.targets, m.selectors)
-		
+
 	case addTargetMsg:
 		// Check duplicates
 		exists := false
 		for _, t := range m.targets {
-			if t == msg.name { exists = true; break }
+			if t == msg.name {
+				exists = true
+				break
+			}
 		}
 		if !exists {
 			m.targets = append(m.targets, msg.name)
@@ -385,11 +406,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = maxInt(msg.Width, 0)
 		m.height = maxInt(msg.Height, 0)
 
-		m.listHeight = maxInt(msg.Height - HeaderHeight - FooterHeight - UILayoutPadding, 1)
+		m.listHeight = maxInt(msg.Height-HeaderHeight-FooterHeight-UILayoutPadding, 1)
 
-		paneWidth := maxInt(int(float64(msg.Width) * LeftPaneWidthRatio), 0)
-		vpWidth := maxInt(msg.Width - paneWidth - 4, 0)
-		vpHeight := maxInt(msg.Height - HeaderHeight - FooterHeight - UILayoutPadding, 0)
+		paneWidth := maxInt(int(float64(msg.Width)*LeftPaneWidthRatio), 0)
+		vpWidth := maxInt(msg.Width-paneWidth-4, 0)
+		vpHeight := maxInt(msg.Height-HeaderHeight-FooterHeight-UILayoutPadding, 0)
 
 		if !m.ready {
 			m.viewport = viewport.New(vpWidth, vpHeight)
@@ -417,8 +438,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.items = msg.items
 			// Merge maps
-			for k, v := range msg.selectors { m.selectors[k] = v }
-			for k, v := range msg.helmReleases { m.helmReleases[k] = v }
+			for k, v := range msg.selectors {
+				m.selectors[k] = v
+			}
+			for k, v := range msg.helmReleases {
+				m.helmReleases[k] = v
+			}
 
 			// Try to restore cursor to the same item
 			if currentSelection != nil && len(m.items) > 0 {
@@ -512,23 +537,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				val := m.textInput.Value()
 				m.inputMode = false
 				m.textInput.Blur()
-				
+
 				if m.filterMode {
 					m.activeFilter = val
 					if val != "" {
 						re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(val))
-						if err == nil { m.filterRegex = re }
+						if err == nil {
+							m.filterRegex = re
+						}
 					} else {
 						m.filterRegex = nil
 					}
 					m.filterMode = false
-					m.updateViewportContent() 
+					m.updateViewportContent()
 				} else if m.shortcutMode != "" {
 					// Handle shortcut mode input
 					m.textInput.Reset()
 					shortcut := m.shortcutMode
 					m.shortcutMode = ""
-					
+
 					switch shortcut {
 					case "scale":
 						// Validate scale value is a positive integer
@@ -592,7 +619,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					m.textInput.Reset()
-					
+
 					// Special handling for :add and :remove which need to return a Msg, not a Cmd
 					parts := strings.Fields(val)
 					if len(parts) >= 2 && parts[0] == "add" {
@@ -631,14 +658,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, func() tea.Msg { return removeTargetMsg{name: targetToRemove} }
 					}
-					
+
 					// Find the helm release for current deployment context
 					deploymentName := getCurrentDeploymentName(m.items, m.cursor)
 					helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.helmReleases)
 					cmds = append(cmds, executeCommand(val, helmRelease, deploymentName))
 				}
 				return m, tea.Batch(cmds...)
-				
+
 			case "esc":
 				m.inputMode = false
 				m.filterMode = false
@@ -655,12 +682,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Store old value to detect changes
 		oldValue := m.textInput.Value()
 		m.textInput, cmd = m.textInput.Update(msg)
-		
+
 		// If text changed in add/remove mode, update suggestions
 		if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.textInput.Value() != oldValue {
 			m.updateSuggestions()
 		}
-		
+
 		return m, cmd
 	}
 
@@ -688,7 +715,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Focus()
 			m.updateViewportContent()
 			return m, textinput.Blink
-			
+
 		case "esc":
 			if m.activeFilter != "" {
 				m.activeFilter = ""
@@ -782,13 +809,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.partialKey = "" // Clear any partial key
 			target := ""
 			switch msg.String() {
-			case "1": target = "DEP"
-			case "2": target = "HELM"
-			case "3": target = "CM"
-			case "4": target = "SEC"
-			case "5": target = "POD"
+			case "1":
+				target = "DEP"
+			case "2":
+				target = "HELM"
+			case "3":
+				target = "CM"
+			case "4":
+				target = "SEC"
+			case "5":
+				target = "POD"
 			}
-			
+
 			// Find next index
 			start := 0
 			// If we are currently on this type, start searching from next item
@@ -830,14 +862,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
-				if m.cursor < m.listOffset { m.listOffset = m.cursor }
+				if m.cursor < m.listOffset {
+					m.listOffset = m.cursor
+				}
 				m.activeTab = 0
 				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
 		case "down", "j":
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
-				if m.cursor >= m.listOffset + m.listHeight { m.listOffset++ }
+				if m.cursor >= m.listOffset+m.listHeight {
+					m.listOffset++
+				}
 				m.activeTab = 0
 				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 			}
@@ -913,7 +949,7 @@ func (m *model) updateViewportContent() {
 			r, err := regexp.Compile("(?i)" + regexp.QuoteMeta(m.activeFilter))
 			if err == nil {
 				re = r
-				m.filterRegex = r  // Cache for future calls
+				m.filterRegex = r // Cache for future calls
 			}
 		}
 
@@ -932,33 +968,39 @@ func (m *model) updateViewportContent() {
 			content = strings.Join(filtered, "\n")
 		}
 	}
-	
+
 	wrapWidth := m.viewport.Width - 2
-	if wrapWidth < MinWrapWidth { wrapWidth = MinWrapWidth }
+	if wrapWidth < MinWrapWidth {
+		wrapWidth = MinWrapWidth
+	}
 	wrapper := lipgloss.NewStyle().Width(wrapWidth)
 	m.viewport.SetContent(wrapper.Render(content))
 }
 
 func (m model) View() string {
-	if !m.ready { return "Initializing..." }
+	if !m.ready {
+		return "Initializing..."
+	}
 
 	leftWidth := int(float64(m.width) * LeftPaneWidthRatio)
-	if leftWidth < MinLeftPaneWidth { leftWidth = MinLeftPaneWidth }
-	
+	if leftWidth < MinLeftPaneWidth {
+		leftWidth = MinLeftPaneWidth
+	}
+
 	var listItems []string
 	// Header Title
 	listItems = append(listItems, styleTitle.Render("K9s Deck"))
-	
+
 	infoLine := fmt.Sprintf("%s | %s", m.lastUpd.Format("15:04:05"), Context)
 	if m.err != nil {
-		listItems = append(listItems, styleErr.Render("Err: " + m.err.Error()))
+		listItems = append(listItems, styleErr.Render("Err: "+m.err.Error()))
 	} else {
 		listItems = append(listItems, styleDim.Render(infoLine))
 	}
 
 	// Show status message if present (e.g., "Yanked to clipboard")
 	if m.statusMsg != "" {
-		listItems = append(listItems, styleTitle.Render("✓ " + m.statusMsg))
+		listItems = append(listItems, styleTitle.Render("✓ "+m.statusMsg))
 	}
 
 	listItems = append(listItems, "")
@@ -967,12 +1009,16 @@ func (m model) View() string {
 		listItems = append(listItems, "Loading resources...")
 	} else {
 		end := m.listOffset + m.listHeight
-		if end > len(m.items) { end = len(m.items) }
+		if end > len(m.items) {
+			end = len(m.items)
+		}
 
 		for i := m.listOffset; i < end; i++ {
-			if i >= len(m.items) { break }
+			if i >= len(m.items) {
+				break
+			}
 			item := m.items[i]
-			
+
 			if item.Type == "HDR" {
 				listItems = append(listItems, styleHeader.Render(item.Name))
 				continue
@@ -988,12 +1034,12 @@ func (m model) View() string {
 			case "POD":
 				icon = "📦"
 				statusStr = fmt.Sprintf("(%s)", item.Status)
-				if strings.Contains(item.Status, "Running") && !strings.Contains(item.Status, "0/") { 
-					st = st.Copy().Foreground(cGreen) 
+				if strings.Contains(item.Status, "Running") && !strings.Contains(item.Status, "0/") {
+					st = st.Copy().Foreground(cGreen)
 				} else if strings.Contains(item.Status, "Terminating") || strings.Contains(item.Status, "ContainerCreating") || strings.Contains(item.Status, "Pending") || strings.Contains(item.Status, "0/") {
 					st = st.Copy().Foreground(cYellow)
-				} else { 
-					st = st.Copy().Foreground(cRed) 
+				} else {
+					st = st.Copy().Foreground(cRed)
 				}
 			case "HELM":
 				icon = "⚓"
@@ -1005,13 +1051,17 @@ func (m model) View() string {
 				icon = "📜"
 				st = st.Copy().Foreground(cSecondary)
 			}
-			
+
 			availNameWidth := leftWidth - 9 - len(statusStr) - 2
-			if availNameWidth < 5 { availNameWidth = 5 } 
+			if availNameWidth < 5 {
+				availNameWidth = 5
+			}
 			nameDisplay := item.Name
 			if len(nameDisplay) > availNameWidth {
-			    cutLen := availNameWidth - 1
-			    if cutLen < 0 { cutLen = 0 }
+				cutLen := availNameWidth - 1
+				if cutLen < 0 {
+					cutLen = 0
+				}
 				nameDisplay = nameDisplay[:cutLen] + "…"
 			}
 			label := fmt.Sprintf("%s %-4s %s %s", icon, item.Type, nameDisplay, statusStr)
@@ -1030,13 +1080,23 @@ func (m model) View() string {
 		curr := m.items[m.cursor]
 		if curr.Type == "DEP" {
 			t1, t2, t3 := styleTabInactive, styleTabInactive, styleTabInactive
-			if m.activeTab == 0 { t1 = styleTabActive } 
-			if m.activeTab == 1 { t2 = styleTabActive }
-			if m.activeTab == 2 { t3 = styleTabActive }
+			if m.activeTab == 0 {
+				t1 = styleTabActive
+			}
+			if m.activeTab == 1 {
+				t2 = styleTabActive
+			}
+			if m.activeTab == 2 {
+				t3 = styleTabActive
+			}
 			tabs = lipgloss.JoinHorizontal(lipgloss.Top, t1.Render("YAML"), t2.Render("Events"), t3.Render("Logs"))
 		} else if curr.Type == "POD" {
 			t1, t2 := styleTabInactive, styleTabInactive
-			if m.activeTab == 0 { t1 = styleTabActive } else { t2 = styleTabActive }
+			if m.activeTab == 0 {
+				t1 = styleTabActive
+			} else {
+				t2 = styleTabActive
+			}
 			tabs = lipgloss.JoinHorizontal(lipgloss.Top, t1.Render("YAML"), t2.Render("Logs"))
 		} else {
 			tabs = styleTabActive.Render("Details")
@@ -1052,7 +1112,7 @@ func (m model) View() string {
 	var footer string
 	if m.inputMode {
 		inputView := m.textInput.View()
-		
+
 		// Show suggestions for add/remove mode
 		if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions {
 			suggestions := m.getFilteredSuggestions()
@@ -1068,14 +1128,14 @@ func (m model) View() string {
 					}
 					suggestionLines = append(suggestionLines, prefix+suggestion)
 				}
-				
+
 				suggestionsView := lipgloss.JoinVertical(lipgloss.Left, suggestionLines...)
 				action := "Add"
 				if m.shortcutMode == "remove" {
 					action = "Remove"
 				}
 				helpLine := styleDim.Render(fmt.Sprintf(" [Tab] Complete  [↑↓] Navigate  [Enter] %s  [Esc] Cancel", action))
-				footer = lipgloss.JoinVertical(lipgloss.Left, 
+				footer = lipgloss.JoinVertical(lipgloss.Left,
 					styleCmdBar.Width(m.width).Render(inputView),
 					suggestionsView,
 					helpLine)
@@ -1114,12 +1174,14 @@ func runCmd(name string, args ...string) ([]byte, error) {
 // fetchAvailableDeployments gets all deployments in the current namespace
 func fetchAvailableDeployments() tea.Cmd {
 	return func() tea.Msg {
-		out, err := runCmd("kubectl", "get", "deployments", "-n", Namespace, "--context", Context, "-o", "jsonpath={.items[*].metadata.name}")
+		ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+		defer cancel()
+
+		deployments, err := client.ListDeployments(ctx, Namespace)
 		if err != nil {
 			return suggestionsMsg{deployments: []string{}}
 		}
-		
-		deployments := strings.Fields(strings.TrimSpace(string(out)))
+
 		return suggestionsMsg{deployments: deployments}
 	}
 }
@@ -1168,43 +1230,67 @@ func yankCmd(content string) tea.Cmd {
 func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 	return func() tea.Msg {
 		parts := strings.Fields(input)
-		if len(parts) == 0 { return nil }
+		if len(parts) == 0 {
+			return nil
+		}
 		verb := parts[0]
 
 		// :add is handled in Update now via addTargetMsg
 
-		var cmd *exec.Cmd
 		ctx, cancel := context.WithTimeout(context.Background(), LongCommandTimeout)
 		defer cancel()
 
 		switch verb {
 		case "scale":
-			if len(parts) < 2 { return detailsMsg{err: fmt.Errorf("Usage: scale <replicas>")} }
-			if deploymentName == "" { return detailsMsg{err: fmt.Errorf("No deployment selected")} }
-			cmd = exec.CommandContext(ctx, "kubectl", "scale", "deployment", deploymentName, "--replicas="+parts[1], "-n", Namespace, "--context", Context)
+			if len(parts) < 2 {
+				return detailsMsg{err: fmt.Errorf("Usage: scale <replicas>")}
+			}
+			if deploymentName == "" {
+				return detailsMsg{err: fmt.Errorf("No deployment selected")}
+			}
+			replicas := 0
+			if _, err := fmt.Sscanf(parts[1], "%d", &replicas); err != nil {
+				return detailsMsg{err: fmt.Errorf("Invalid replica count: %s", parts[1])}
+			}
+			err := client.ScaleDeployment(ctx, Namespace, deploymentName, replicas)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Scale failed: %v", err)}
+			}
+			return commandFinishedMsg{}
 		case "restart":
-			if deploymentName == "" { return detailsMsg{err: fmt.Errorf("No deployment selected")} }
-			cmd = exec.CommandContext(ctx, "kubectl", "rollout", "restart", "deployment", deploymentName, "-n", Namespace, "--context", Context)
+			if deploymentName == "" {
+				return detailsMsg{err: fmt.Errorf("No deployment selected")}
+			}
+			err := client.RestartDeployment(ctx, Namespace, deploymentName)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Restart failed: %v", err)}
+			}
+			return commandFinishedMsg{}
 		case "rollback":
-			if helmRelease == "" { return detailsMsg{err: fmt.Errorf("No Helm release associated.")} }
-			if len(parts) < 2 { return detailsMsg{err: fmt.Errorf("Usage: rollback <revision>")} }
-			cmd = exec.CommandContext(ctx, "helm", "rollback", helmRelease, parts[1], "-n", Namespace, "--kube-context", Context)
+			if helmRelease == "" {
+				return detailsMsg{err: fmt.Errorf("No Helm release associated.")}
+			}
+			if len(parts) < 2 {
+				return detailsMsg{err: fmt.Errorf("Usage: rollback <revision>")}
+			}
+			revision := 0
+			if _, err := fmt.Sscanf(parts[1], "%d", &revision); err != nil {
+				return detailsMsg{err: fmt.Errorf("Invalid revision: %s", parts[1])}
+			}
+			err := client.RollbackHelm(ctx, Namespace, helmRelease, revision)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Rollback failed: %v", err)}
+			}
+			return commandFinishedMsg{}
 		case "fetch":
 			return tea.Batch(
-			    func() tea.Msg { return detailsMsg{content: "Manual Refresh...", isYaml: false} },
-			    func() tea.Msg { return commandFinishedMsg{} },
-			    tickCmd(),
+				func() tea.Msg { return detailsMsg{content: "Manual Refresh...", isYaml: false} },
+				func() tea.Msg { return commandFinishedMsg{} },
+				tickCmd(),
 			)()
 		default:
 			return detailsMsg{err: fmt.Errorf("Unknown command: %s", verb)}
 		}
-		out, err := cmd.CombinedOutput()
-		if err != nil { return detailsMsg{err: fmt.Errorf("Failed:\n%s\n%s", err, string(out))} }
-		return tea.Batch(
-			func() tea.Msg { return detailsMsg{content: fmt.Sprintf("$ %s\n%s\nSUCCESS", input, string(out)), isYaml: false} },
-			func() tea.Msg { return commandFinishedMsg{} },
-			tickCmd(), 
-		)()
 	}
 }
 
@@ -1212,7 +1298,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		
+
 		// Use map to maintain consistent ordering
 		targetItems := make(map[string][]item)
 		updatedSelectors := make(map[string]string)
@@ -1223,9 +1309,12 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 			wg.Add(1)
 			go func(tName string) {
 				defer wg.Done()
-				
-				depOut, depErr := runCmd("kubectl", "get", "deployment", tName, "-n", Namespace, "--context", Context, "-o", "json")
-				
+
+				ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+				defer cancel()
+
+				depOut, depErr := client.GetDeployment(ctx, Namespace, tName)
+
 				if depErr != nil {
 					mu.Lock()
 					targetItems[tName] = []item{{Type: "HDR", Name: fmt.Sprintf("=== %s (Err) ===", tName)}}
@@ -1235,29 +1324,31 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 					mu.Unlock()
 					return
 				}
-				
+
 				jsonRaw := string(depOut)
-				
+
 				// Collect local items for this deployment
 				var localItems []item
 				localItems = append(localItems, item{Type: "HDR", Name: fmt.Sprintf("=== %s ===", tName)})
 				localItems = append(localItems, item{Type: "DEP", Name: tName, Status: "Active"})
-				
+
 				// Helm
 				annotations := gjson.Get(jsonRaw, "metadata.annotations").Map()
 				helmName := ""
-				if val, ok := annotations["meta.helm.sh/release-name"]; ok { helmName = val.String() }
-				if helmName != "" { 
-					localItems = append(localItems, item{Type: "HELM", Name: helmName, Status: "Release"}) 
+				if val, ok := annotations["meta.helm.sh/release-name"]; ok {
+					helmName = val.String()
+				}
+				if helmName != "" {
+					localItems = append(localItems, item{Type: "HELM", Name: helmName, Status: "Release"})
 					mu.Lock()
 					updatedHelm[tName] = helmName
 					mu.Unlock()
 				}
-				
+
 				// Secrets/CM
 				seenSecrets := make(map[string]bool)
 				seenConfigMaps := make(map[string]bool)
-				
+
 				containers := gjson.Get(jsonRaw, "spec.template.spec.containers").Array()
 				for _, c := range containers {
 					// Check envFrom
@@ -1285,7 +1376,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 						return true
 					})
 				}
-				
+
 				// Check volumes
 				gjson.Get(jsonRaw, "spec.template.spec.volumes").ForEach(func(_, v gjson.Result) bool {
 					if name := v.Get("secret.secretName").String(); name != "" && !seenSecrets[name] {
@@ -1298,29 +1389,35 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 					}
 					return true
 				})
-				
+
 				// Pods
 				selectorMap := gjson.Get(jsonRaw, "spec.selector.matchLabels").Map()
 				keys := make([]string, 0, len(selectorMap))
-				for k := range selectorMap { keys = append(keys, k) }
+				for k := range selectorMap {
+					keys = append(keys, k)
+				}
 				sort.Strings(keys)
 				labels := make([]string, 0, len(keys))
-				for _, k := range keys { labels = append(labels, k+"="+selectorMap[k].String()) }
+				for _, k := range keys {
+					labels = append(labels, k+"="+selectorMap[k].String())
+				}
 				newSelector := strings.Join(labels, ",")
-				
+
 				if newSelector != "" {
 					mu.Lock()
 					updatedSelectors[tName] = newSelector
 					mu.Unlock()
-					
-					podOut, podErr := runCmd("kubectl", "get", "pods", "-n", Namespace, "--context", Context, "-l", newSelector, "-o", "json")
+
+					podOut, podErr := client.ListPods(ctx, Namespace, newSelector)
 					if podErr == nil {
 						gjson.Get(string(podOut), "items").ForEach(func(_, p gjson.Result) bool {
 							phase := p.Get("status.phase").String()
 							readyCount, totalCount := 0, 0
 							p.Get("status.containerStatuses").ForEach(func(_, c gjson.Result) bool {
 								totalCount++
-								if c.Get("ready").Bool() { readyCount++ }
+								if c.Get("ready").Bool() {
+									readyCount++
+								}
 								return true
 							})
 							isReady := totalCount > 0 && readyCount == totalCount
@@ -1332,10 +1429,15 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 							} else {
 								waitingReason := ""
 								p.Get("status.containerStatuses").ForEach(func(_, c gjson.Result) bool {
-									if r := c.Get("state.waiting.reason").String(); r != "" { waitingReason = r; return false }
+									if r := c.Get("state.waiting.reason").String(); r != "" {
+										waitingReason = r
+										return false
+									}
 									return true
 								})
-								if waitingReason != "" { status = waitingReason }
+								if waitingReason != "" {
+									status = waitingReason
+								}
 							}
 							fullStatus := fmt.Sprintf("%s %d/%d", status, readyCount, totalCount)
 							localItems = append(localItems, item{Type: "POD", Name: p.Get("metadata.name").String(), Status: fullStatus})
@@ -1343,15 +1445,15 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 						})
 					}
 				}
-				
+
 				mu.Lock()
 				targetItems[tName] = localItems
 				mu.Unlock()
 			}(targetName)
 		}
-		
+
 		wg.Wait()
-		
+
 		// Assemble items in consistent order (sorted by target name)
 		var globalItems []item
 		sort.Strings(targets) // Ensure consistent target order
@@ -1360,7 +1462,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 				globalItems = append(globalItems, items...)
 			}
 		}
-		
+
 		return dataMsg{items: globalItems, selectors: updatedSelectors, helmReleases: updatedHelm, err: combinedErr}
 	}
 }
@@ -1370,27 +1472,36 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 		var out []byte
 		var err error
 		isYaml := true
-		
+
+		ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+		defer cancel()
+
 		if i.Type == "HDR" {
 			return detailsMsg{content: "Service Group: " + i.Name, isYaml: false}
 		}
 
 		if i.Type == "DEP" {
 			if tab == 1 { // Events
-				out, err = runCmd("kubectl", "get", "events", "-n", Namespace, "--context", Context, "--sort-by=.lastTimestamp", "-o", "json")
-				if err != nil { return detailsMsg{err: fmt.Errorf("%v: %s", err, string(out))} }
+				out, err = client.GetEvents(ctx, Namespace)
+				if err != nil {
+					return detailsMsg{err: fmt.Errorf("Events error: %v", err)}
+				}
 				var events []string
 				events = append(events, fmt.Sprintf("%-25s %-10s %-15s %s", "TIMESTAMP", "TYPE", "REASON", "MESSAGE"))
 				gjson.Get(string(out), "items").ForEach(func(_, e gjson.Result) bool {
 					objName := e.Get("involvedObject.name").String()
 					if strings.Contains(objName, i.Name) {
 						ts := e.Get("lastTimestamp").String()
-						if ts == "" { ts = e.Get("eventTime").String() }
+						if ts == "" {
+							ts = e.Get("eventTime").String()
+						}
 						events = append(events, fmt.Sprintf("%-25s %-10s %-15s %s", ts, e.Get("type").String(), e.Get("reason").String(), e.Get("message").String()))
 					}
 					return true
 				})
-				if len(events) == 1 { return detailsMsg{content: "No recent events found.", isYaml: false} }
+				if len(events) == 1 {
+					return detailsMsg{content: "No recent events found.", isYaml: false}
+				}
 				return detailsMsg{content: strings.Join(events, "\n"), isYaml: false}
 			} else if tab == 2 { // Aggregated Logs
 				// Use cached selector data instead of kubectl call
@@ -1398,10 +1509,12 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				if !exists || selector == "" {
 					return detailsMsg{err: fmt.Errorf("No label selector found for deployment %s", i.Name)}
 				}
-				
+
 				// Get logs from all pods using cached label selector
 				out, err = runCmd("kubectl", "logs", "-l", selector, "-n", Namespace, "--context", Context, "--all-containers=true", "--prefix", fmt.Sprintf("--tail=%d", DeploymentLogTail))
-				if err != nil { return detailsMsg{err: fmt.Errorf("Logs Err: %v", err)} }
+				if err != nil {
+					return detailsMsg{err: fmt.Errorf("Logs Err: %v", err)}
+				}
 				return detailsMsg{content: string(out), isYaml: false}
 			}
 		}
@@ -1410,22 +1523,17 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 			// Detect if pod has multiple containers
 			isMulti, detectionErr := detectMultiContainer(i.Name, multiContainerInfo)
 
-			// Build kubectl logs command
-			args := []string{"logs", i.Name, "-n", Namespace, "--context", Context,
-				fmt.Sprintf("--tail=%d", DefaultLogTailLines), "--all-containers=true"}
-
-			// Add --prefix flag only for multi-container pods
-			if detectionErr == nil && isMulti {
-				args = append(args, "--prefix")
+			// Use client to get pod logs
+			prefix := detectionErr == nil && isMulti
+			out, err = client.GetPodLogs(ctx, Namespace, i.Name, DefaultLogTailLines, true, prefix)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Log error: %v", err)}
 			}
-
-			out, err = runCmd("kubectl", args...)
-			if err != nil { return detailsMsg{err: fmt.Errorf("%v: %s", err, string(out))} }
 			return detailsMsg{content: string(out), isYaml: false}
 		}
 
 		if i.Type == "SEC" {
-			out, err = runCmd("kubectl", "get", "secret", i.Name, "-n", Namespace, "--context", Context, "-o", "json")
+			out, err = client.GetSecret(ctx, Namespace, i.Name)
 			if err == nil {
 				dataMap := gjson.Get(string(out), "data").Map()
 				decoded := make(map[string]string)
@@ -1437,16 +1545,29 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				return detailsMsg{content: string(pretty), isYaml: true}
 			}
 		} else if i.Type == "HELM" {
-			out, err = runCmd("helm", "history", i.Name, "-n", Namespace, "--kube-context", Context)
+			out, err = client.GetHelmHistory(ctx, Namespace, i.Name)
 			isYaml = false
+		} else if i.Type == "CM" {
+			out, err = client.GetConfigMap(ctx, Namespace, i.Name)
+		} else if i.Type == "DEP" {
+			// For deployment YAML view (tab == 0)
+			out, err = client.GetDeployment(ctx, Namespace, i.Name)
+			if err == nil {
+				// Pretty-print the JSON for readability
+				var prettyJSON bytes.Buffer
+				if jsonErr := json.Indent(&prettyJSON, out, "", "  "); jsonErr == nil {
+					out = prettyJSON.Bytes()
+				}
+			}
+			isYaml = true
 		} else {
-			kind := "deployment"
-			if i.Type == "POD" { kind = "pod" }
-			if i.Type == "CM" { kind = "configmap" }
-			out, err = runCmd("kubectl", "get", kind, i.Name, "-n", Namespace, "--context", Context, "-o", "yaml")
+			// For POD YAML, use kubectl for now (no GetPod method yet)
+			out, err = runCmd("kubectl", "get", "pod", i.Name, "-n", Namespace, "--context", Context, "-o", "yaml")
 		}
 
-		if err != nil { return detailsMsg{err: fmt.Errorf("%s\n%s", err.Error(), string(out))} }
+		if err != nil {
+			return detailsMsg{err: fmt.Errorf("%s\n%s", err.Error(), string(out))}
+		}
 		return detailsMsg{content: string(out), isYaml: isYaml}
 	}
 }
@@ -1454,12 +1575,16 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 func highlight(content, format string) string {
 	var buf bytes.Buffer
 	err := quick.Highlight(&buf, content, format, "terminal256", "dracula")
-	if err != nil { return content }
+	if err != nil {
+		return content
+	}
 	return buf.String()
 }
 
 func getCurrentDeploymentName(items []item, cursor int) string {
-	if len(items) == 0 || cursor >= len(items) { return "" }
+	if len(items) == 0 || cursor >= len(items) {
+		return ""
+	}
 	curr := items[cursor]
 	if curr.Type == "DEP" {
 		return curr.Name
@@ -1475,7 +1600,9 @@ func getCurrentDeploymentName(items []item, cursor int) string {
 
 func getCurrentHelmRelease(items []item, cursor int, helmReleases map[string]string) string {
 	deploymentName := getCurrentDeploymentName(items, cursor)
-	if deploymentName == "" { return "" }
+	if deploymentName == "" {
+		return ""
+	}
 	return helmReleases[deploymentName]
 }
 
@@ -1483,9 +1610,13 @@ func getCurrentHelmRelease(items []item, cursor int, helmReleases map[string]str
 
 func isPositiveInteger(s string) bool {
 	s = strings.TrimSpace(s)
-	if s == "" || s == "0" { return false }
+	if s == "" || s == "0" {
+		return false
+	}
 	for _, r := range s {
-		if r < '0' || r > '9' { return false }
+		if r < '0' || r > '9' {
+			return false
+		}
 	}
 	return true
 }
@@ -1513,14 +1644,14 @@ func (m *model) updateSuggestions() {
 		m.showSuggestions = false
 		return
 	}
-	
+
 	input := strings.ToLower(strings.TrimSpace(m.textInput.Value()))
 	if input == "" {
 		m.showSuggestions = true
 		m.suggestionIndex = 0
 		return
 	}
-	
+
 	// Filter suggestions that contain the input
 	filtered := make([]string, 0, len(m.suggestions))
 
@@ -1543,7 +1674,7 @@ func (m *model) updateSuggestions() {
 			}
 		}
 	}
-	
+
 	m.suggestions = filtered
 	m.showSuggestions = len(filtered) > 0
 	m.suggestionIndex = 0
@@ -1719,20 +1850,15 @@ func detectMultiContainer(podName string, cache *multiContainerCache) (bool, err
 	}
 	cache.mu.RUnlock()
 
-	// Query kubectl
+	// Query via client
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "pod", podName,
-		"-n", Namespace, "--context", Context,
-		"-o", "jsonpath={.spec.containers[*].name}")
-
-	out, err := cmd.CombinedOutput()
+	containerNames, err := client.GetPodContainers(ctx, Namespace, podName)
 	if err != nil {
 		return false, err
 	}
 
-	containerNames := strings.Fields(string(out))
 	isMulti := len(containerNames) > 1
 
 	// Cache result
