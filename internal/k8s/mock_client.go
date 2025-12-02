@@ -8,10 +8,10 @@ import (
 // MockClient is a mock implementation of the Client interface for testing
 type MockClient struct {
 	// Deployment operations
-	GetDeploymentFunc    func(ctx context.Context, namespace, name string) ([]byte, error)
-	ScaleDeploymentFunc  func(ctx context.Context, namespace, name string, replicas int) error
+	GetDeploymentFunc     func(ctx context.Context, namespace, name string) ([]byte, error)
+	ScaleDeploymentFunc   func(ctx context.Context, namespace, name string, replicas int) error
 	RestartDeploymentFunc func(ctx context.Context, namespace, name string) error
-	ListDeploymentsFunc  func(ctx context.Context, namespace string) ([]string, error)
+	ListDeploymentsFunc   func(ctx context.Context, namespace string) ([]string, error)
 
 	// Pod operations
 	ListPodsFunc         func(ctx context.Context, namespace, selector string) ([]byte, error)

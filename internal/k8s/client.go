@@ -50,6 +50,11 @@ func NewKubectlClient(context string) *KubectlClient {
 	}
 }
 
+// NewClient creates a new Kubernetes client (defaults to client-go)
+func NewClient(kubeContext string) (Client, error) {
+	return NewClientGoClient(kubeContext)
+}
+
 // runCmd executes a command with timeout
 func (c *KubectlClient) runCmd(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
