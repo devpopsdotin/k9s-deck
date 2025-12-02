@@ -22,6 +22,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tidwall/gjson"
+
+	"github.com/devpopsdotin/k9s-deck/internal/k8s"
+	"github.com/devpopsdotin/k9s-deck/internal/logger"
 )
 
 // --- CONFIG ---
@@ -29,6 +32,7 @@ var (
 	Context    string
 	Namespace  string
 	Deployment string
+	client     k8s.Client // Kubernetes client (client-go)
 )
 
 // --- CONSTANTS ---
@@ -224,6 +228,20 @@ func main() {
 		Context = os.Args[1]
 		Namespace = os.Args[2]
 		Deployment = os.Args[3]
+	}
+
+	// Initialize logger (writes to /tmp/k9s-deck.log)
+	if err := logger.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize logger: %v\n", err)
+		// Continue anyway - logging is not critical
+	}
+
+	// Initialize Kubernetes client (uses client-go for performance)
+	var err error
+	client, err = k8s.NewClient(Context)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to create Kubernetes client: %v\n", err)
+		os.Exit(1)
 	}
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -1156,12 +1174,14 @@ func runCmd(name string, args ...string) ([]byte, error) {
 // fetchAvailableDeployments gets all deployments in the current namespace
 func fetchAvailableDeployments() tea.Cmd {
 	return func() tea.Msg {
-		out, err := runCmd("kubectl", "get", "deployments", "-n", Namespace, "--context", Context, "-o", "jsonpath={.items[*].metadata.name}")
+		ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+		defer cancel()
+
+		deployments, err := client.ListDeployments(ctx, Namespace)
 		if err != nil {
 			return suggestionsMsg{deployments: []string{}}
 		}
 
-		deployments := strings.Fields(strings.TrimSpace(string(out)))
 		return suggestionsMsg{deployments: deployments}
 	}
 }
@@ -1217,7 +1237,6 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 
 		// :add is handled in Update now via addTargetMsg
 
-		var cmd *exec.Cmd
 		ctx, cancel := context.WithTimeout(context.Background(), LongCommandTimeout)
 		defer cancel()
 
@@ -1229,12 +1248,24 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 			if deploymentName == "" {
 				return detailsMsg{err: fmt.Errorf("No deployment selected")}
 			}
-			cmd = exec.CommandContext(ctx, "kubectl", "scale", "deployment", deploymentName, "--replicas="+parts[1], "-n", Namespace, "--context", Context)
+			replicas := 0
+			if _, err := fmt.Sscanf(parts[1], "%d", &replicas); err != nil {
+				return detailsMsg{err: fmt.Errorf("Invalid replica count: %s", parts[1])}
+			}
+			err := client.ScaleDeployment(ctx, Namespace, deploymentName, replicas)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Scale failed: %v", err)}
+			}
+			return commandFinishedMsg{}
 		case "restart":
 			if deploymentName == "" {
 				return detailsMsg{err: fmt.Errorf("No deployment selected")}
 			}
-			cmd = exec.CommandContext(ctx, "kubectl", "rollout", "restart", "deployment", deploymentName, "-n", Namespace, "--context", Context)
+			err := client.RestartDeployment(ctx, Namespace, deploymentName)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Restart failed: %v", err)}
+			}
+			return commandFinishedMsg{}
 		case "rollback":
 			if helmRelease == "" {
 				return detailsMsg{err: fmt.Errorf("No Helm release associated.")}
@@ -1242,7 +1273,15 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 			if len(parts) < 2 {
 				return detailsMsg{err: fmt.Errorf("Usage: rollback <revision>")}
 			}
-			cmd = exec.CommandContext(ctx, "helm", "rollback", helmRelease, parts[1], "-n", Namespace, "--kube-context", Context)
+			revision := 0
+			if _, err := fmt.Sscanf(parts[1], "%d", &revision); err != nil {
+				return detailsMsg{err: fmt.Errorf("Invalid revision: %s", parts[1])}
+			}
+			err := client.RollbackHelm(ctx, Namespace, helmRelease, revision)
+			if err != nil {
+				return detailsMsg{err: fmt.Errorf("Rollback failed: %v", err)}
+			}
+			return commandFinishedMsg{}
 		case "fetch":
 			return tea.Batch(
 				func() tea.Msg { return detailsMsg{content: "Manual Refresh...", isYaml: false} },
@@ -1252,17 +1291,6 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 		default:
 			return detailsMsg{err: fmt.Errorf("Unknown command: %s", verb)}
 		}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return detailsMsg{err: fmt.Errorf("Failed:\n%s\n%s", err, string(out))}
-		}
-		return tea.Batch(
-			func() tea.Msg {
-				return detailsMsg{content: fmt.Sprintf("$ %s\n%s\nSUCCESS", input, string(out)), isYaml: false}
-			},
-			func() tea.Msg { return commandFinishedMsg{} },
-			tickCmd(),
-		)()
 	}
 }
 
@@ -1282,7 +1310,10 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 			go func(tName string) {
 				defer wg.Done()
 
-				depOut, depErr := runCmd("kubectl", "get", "deployment", tName, "-n", Namespace, "--context", Context, "-o", "json")
+				ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+				defer cancel()
+
+				depOut, depErr := client.GetDeployment(ctx, Namespace, tName)
 
 				if depErr != nil {
 					mu.Lock()
@@ -1377,7 +1408,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 					updatedSelectors[tName] = newSelector
 					mu.Unlock()
 
-					podOut, podErr := runCmd("kubectl", "get", "pods", "-n", Namespace, "--context", Context, "-l", newSelector, "-o", "json")
+					podOut, podErr := client.ListPods(ctx, Namespace, newSelector)
 					if podErr == nil {
 						gjson.Get(string(podOut), "items").ForEach(func(_, p gjson.Result) bool {
 							phase := p.Get("status.phase").String()
@@ -1442,15 +1473,18 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 		var err error
 		isYaml := true
 
+		ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+		defer cancel()
+
 		if i.Type == "HDR" {
 			return detailsMsg{content: "Service Group: " + i.Name, isYaml: false}
 		}
 
 		if i.Type == "DEP" {
 			if tab == 1 { // Events
-				out, err = runCmd("kubectl", "get", "events", "-n", Namespace, "--context", Context, "--sort-by=.lastTimestamp", "-o", "json")
+				out, err = client.GetEvents(ctx, Namespace)
 				if err != nil {
-					return detailsMsg{err: fmt.Errorf("%v: %s", err, string(out))}
+					return detailsMsg{err: fmt.Errorf("Events error: %v", err)}
 				}
 				var events []string
 				events = append(events, fmt.Sprintf("%-25s %-10s %-15s %s", "TIMESTAMP", "TYPE", "REASON", "MESSAGE"))
@@ -1489,24 +1523,17 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 			// Detect if pod has multiple containers
 			isMulti, detectionErr := detectMultiContainer(i.Name, multiContainerInfo)
 
-			// Build kubectl logs command
-			args := []string{"logs", i.Name, "-n", Namespace, "--context", Context,
-				fmt.Sprintf("--tail=%d", DefaultLogTailLines), "--all-containers=true"}
-
-			// Add --prefix flag only for multi-container pods
-			if detectionErr == nil && isMulti {
-				args = append(args, "--prefix")
-			}
-
-			out, err = runCmd("kubectl", args...)
+			// Use client to get pod logs
+			prefix := detectionErr == nil && isMulti
+			out, err = client.GetPodLogs(ctx, Namespace, i.Name, DefaultLogTailLines, true, prefix)
 			if err != nil {
-				return detailsMsg{err: fmt.Errorf("%v: %s", err, string(out))}
+				return detailsMsg{err: fmt.Errorf("Log error: %v", err)}
 			}
 			return detailsMsg{content: string(out), isYaml: false}
 		}
 
 		if i.Type == "SEC" {
-			out, err = runCmd("kubectl", "get", "secret", i.Name, "-n", Namespace, "--context", Context, "-o", "json")
+			out, err = client.GetSecret(ctx, Namespace, i.Name)
 			if err == nil {
 				dataMap := gjson.Get(string(out), "data").Map()
 				decoded := make(map[string]string)
@@ -1518,17 +1545,24 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				return detailsMsg{content: string(pretty), isYaml: true}
 			}
 		} else if i.Type == "HELM" {
-			out, err = runCmd("helm", "history", i.Name, "-n", Namespace, "--kube-context", Context)
+			out, err = client.GetHelmHistory(ctx, Namespace, i.Name)
 			isYaml = false
+		} else if i.Type == "CM" {
+			out, err = client.GetConfigMap(ctx, Namespace, i.Name)
+		} else if i.Type == "DEP" {
+			// For deployment YAML view (tab == 0)
+			out, err = client.GetDeployment(ctx, Namespace, i.Name)
+			if err == nil {
+				// Pretty-print the JSON for readability
+				var prettyJSON bytes.Buffer
+				if jsonErr := json.Indent(&prettyJSON, out, "", "  "); jsonErr == nil {
+					out = prettyJSON.Bytes()
+				}
+			}
+			isYaml = true
 		} else {
-			kind := "deployment"
-			if i.Type == "POD" {
-				kind = "pod"
-			}
-			if i.Type == "CM" {
-				kind = "configmap"
-			}
-			out, err = runCmd("kubectl", "get", kind, i.Name, "-n", Namespace, "--context", Context, "-o", "yaml")
+			// For POD YAML, use kubectl for now (no GetPod method yet)
+			out, err = runCmd("kubectl", "get", "pod", i.Name, "-n", Namespace, "--context", Context, "-o", "yaml")
 		}
 
 		if err != nil {
@@ -1816,20 +1850,15 @@ func detectMultiContainer(podName string, cache *multiContainerCache) (bool, err
 	}
 	cache.mu.RUnlock()
 
-	// Query kubectl
+	// Query via client
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "pod", podName,
-		"-n", Namespace, "--context", Context,
-		"-o", "jsonpath={.spec.containers[*].name}")
-
-	out, err := cmd.CombinedOutput()
+	containerNames, err := client.GetPodContainers(ctx, Namespace, podName)
 	if err != nil {
 		return false, err
 	}
 
-	containerNames := strings.Fields(string(out))
 	isMulti := len(containerNames) > 1
 
 	// Cache result
