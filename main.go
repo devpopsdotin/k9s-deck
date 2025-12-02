@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -109,7 +110,7 @@ var (
 // --- LOG PARSING ---
 var (
 	logLevelRegex  = regexp.MustCompile(`(?i)\b(FATAL|ERROR|ERR|WARN|WARNING|INFO|DEBUG|TRACE)\b`)
-	podPrefixRegex = regexp.MustCompile(`^\[([^/]+)/([^\]]+)\]\s*(.*)$`)
+	podPrefixRegex = regexp.MustCompile(`^\[([^/]+)/([^/]+)/([^\]]+)\]\s*(.*)$`)
 )
 
 func init() {
@@ -174,6 +175,9 @@ type model struct {
 	// Log formatting
 	logFormatMode      bool                  // true=formatted, false=raw
 	multiContainerInfo *multiContainerCache  // cache for multi-container detection
+
+	// Status messages
+	statusMsg string // temporary status message (e.g., "Copied to clipboard")
 }
 
 // --- MESSAGES ---
@@ -199,6 +203,11 @@ type removeTargetMsg struct {
 type suggestionsMsg struct {
 	deployments []string
 }
+type copyMsg struct {
+	success bool
+	err     error
+}
+type clearStatusMsg struct{}
 
 // --- MAIN ---
 func main() {
@@ -354,6 +363,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateSuggestions()
 		}
 		// For remove mode, suggestions are already populated with current targets
+		return m, nil
+
+	case copyMsg:
+		// Handle clipboard copy result
+		if msg.success {
+			m.statusMsg = "Yanked to clipboard"
+		} else {
+			m.statusMsg = fmt.Sprintf("Copy failed: %v", msg.err)
+		}
+		// Clear status message after 2 seconds
+		return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
+
+	case clearStatusMsg:
+		m.statusMsg = ""
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -859,6 +884,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Scroll viewport up one page
 			m.viewport.ViewUp()
 
+		case "y":
+			// Yank (copy) right pane content to clipboard (vim-style)
+			m.partialKey = ""
+			return m, yankCmd(m.rawContent)
+
 		default:
 			// Clear partial key for any unhandled input
 			m.partialKey = ""
@@ -925,6 +955,12 @@ func (m model) View() string {
 	} else {
 		listItems = append(listItems, styleDim.Render(infoLine))
 	}
+
+	// Show status message if present (e.g., "Yanked to clipboard")
+	if m.statusMsg != "" {
+		listItems = append(listItems, styleTitle.Render("✓ " + m.statusMsg))
+	}
+
 	listItems = append(listItems, "")
 
 	if len(m.items) == 0 {
@@ -1050,7 +1086,7 @@ func (m model) View() string {
 			footer = styleCmdBar.Width(m.width).Render(inputView)
 		}
 	} else {
-		hint := " [:] Cmds  [/] Filter  [Tab] View  [f] Format  [Ctrl+d/u] Scroll  [Ctrl-F] Refresh  [rr] Restart  [s] Scale  [R] Rollback  [+] Add  [-] Remove  [q] Quit"
+		hint := " [:] Cmds  [/] Filter  [Tab] View  [f] Format  [y] Yank  [Ctrl+d/u] Scroll  [Ctrl-F] Refresh  [rr] Restart  [s] Scale  [R] Rollback  [+] Add  [-] Remove  [q] Quit"
 
 		// Add format mode indicator
 		if m.logFormatMode {
@@ -1090,6 +1126,43 @@ func fetchAvailableDeployments() tea.Cmd {
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(TickerInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// stripANSI removes ANSI escape codes from a string
+func stripANSI(s string) string {
+	// Regex to match ANSI escape sequences
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// copyToClipboard copies content to system clipboard (cross-platform)
+func copyToClipboard(content string) error {
+	// Strip ANSI color codes before copying
+	cleanContent := stripANSI(content)
+
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	case "windows":
+		cmd = exec.Command("clip")
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+
+	cmd.Stdin = strings.NewReader(cleanContent)
+	return cmd.Run()
+}
+
+// yankCmd copies the current content to clipboard
+func yankCmd(content string) tea.Cmd {
+	return func() tea.Msg {
+		err := copyToClipboard(content)
+		return copyMsg{success: err == nil, err: err}
+	}
 }
 
 func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
@@ -1497,12 +1570,13 @@ func parseLogLine(line string) logLineInfo {
 		LogContent:   line,
 	}
 
-	// Try to extract pod prefix [podname/container]
-	if matches := podPrefixRegex.FindStringSubmatch(line); len(matches) == 4 {
-		info.PodPrefix = matches[1] + "/" + matches[2]
-		info.PodName = matches[1]
-		info.ContainerName = matches[2]
-		info.LogContent = matches[3]
+	// Try to extract pod prefix [pod/podname/container] or [podname/container]
+	if matches := podPrefixRegex.FindStringSubmatch(line); len(matches) == 5 {
+		// kubectl --prefix format: [pod/podname/container]
+		info.PodPrefix = matches[2] + "/" + matches[3]
+		info.PodName = matches[2]
+		info.ContainerName = matches[3]
+		info.LogContent = matches[4]
 	}
 
 	// Detect log level
@@ -1549,19 +1623,26 @@ func getLogLevelColor(level string) lipgloss.Color {
 	}
 }
 
-// shortenPodPrefix shortens pod name but keeps unique suffix
+// shortenPodPrefix extracts replicaset hash and pod suffix
 func shortenPodPrefix(podName, containerName string) string {
-	if len(podName) <= MaxPodPrefixDisplay {
-		return fmt.Sprintf("[%s/%s]", podName, containerName)
+	// Pod format: deployment-replicasethash-podhash
+	// Example: third-service-55c74d7f8-zn5fd
+	// We want: [55c74d7f8-zn5fd]
+	// (deployment name is redundant since we're already viewing that deployment)
+
+	parts := strings.Split(podName, "-")
+	if len(parts) < 3 {
+		// If pod name doesn't follow expected format, return as-is
+		return fmt.Sprintf("[%s]", podName)
 	}
 
-	// Keep last PodPrefixSuffixLen characters (typically the ReplicaSet hash)
-	suffix := podName
-	if len(podName) > PodPrefixSuffixLen {
-		suffix = podName[len(podName)-PodPrefixSuffixLen:]
-	}
+	// Extract replicaset hash (second to last part)
+	replicaSetHash := parts[len(parts)-2]
 
-	return fmt.Sprintf("[..%s/%s]", suffix, containerName)
+	// Extract unique pod suffix (last part)
+	podSuffix := parts[len(parts)-1]
+
+	return fmt.Sprintf("[%s-%s]", replicaSetHash, podSuffix)
 }
 
 // formatPodPrefix formats pod prefix with color and icon
