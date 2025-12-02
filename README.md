@@ -1,5 +1,5 @@
 
-# K9s Deck (v1.4.0)
+# K9s Deck (v1.5.0)
 
 **K9s Deck** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
 
@@ -91,6 +91,7 @@ If you prefer to compile it yourself:
 | **1 - 5** | Global | **Quick Jump**: 1=Dep, 2=Helm, 3=CM, 4=Secret, 5=Pod.<br>*(Press repeatedly to cycle through items)* |
 | **Tab** | DEP / POD | **Toggle View**: Switch between YAML <-> Events (Deployment) or YAML <-> Logs (Pod). |
 | **f** | Logs | **Toggle Format**: Switch between formatted (colored, enhanced) and raw log view. |
+| **y** | Global | **Yank (Copy)**: Copy entire right pane content to clipboard (vim-style). |
 | **Enter** | Global | Refresh the details pane for the selected item. |
 | **Ctrl + F** | Global | **Force Refresh**: Manually trigger a data fetch if the UI seems stale. |
 | **Ctrl + L** | Pod | **Quick Logs**: View the last 200 lines of logs in the right pane. |
