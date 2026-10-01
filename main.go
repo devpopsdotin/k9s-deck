@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -15,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alecthomas/chroma/v2/quick"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +23,7 @@ import (
 
 	"github.com/devpopsdotin/k9s-deck/internal/k8s"
 	"github.com/devpopsdotin/k9s-deck/internal/logger"
+	"github.com/devpopsdotin/k9s-deck/internal/parser"
 )
 
 // --- CONFIG ---
@@ -56,11 +54,6 @@ const (
 	DefaultLogTailLines = 200
 	DeploymentLogTail   = 100
 
-	// Log Formatting
-	PodPrefixSuffixLen  = 7
-	MaxPodPrefixDisplay = 20
-	JSONIndent          = 2
-
 	// List Display
 	DefaultListHeight = 20
 	MaxSuggestions    = 5
@@ -82,20 +75,6 @@ var (
 	cYellow    = lipgloss.Color("220") // Yellow
 	cGray      = lipgloss.Color("240") // Gray
 
-	// Pod color palette for log prefixes
-	podColorPalette = []lipgloss.Color{
-		lipgloss.Color("39"),  // Cyan
-		lipgloss.Color("42"),  // Green
-		lipgloss.Color("220"), // Yellow
-		lipgloss.Color("201"), // Magenta
-		lipgloss.Color("141"), // Purple
-		lipgloss.Color("208"), // Orange
-		lipgloss.Color("51"),  // Light Blue
-		lipgloss.Color("82"),  // Light Green
-		lipgloss.Color("213"), // Pink
-		lipgloss.Color("228"), // Light Yellow
-	}
-
 	styleBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(cGray)
 	stylePane     = lipgloss.NewStyle().Padding(0, 1)
 	styleTitle    = lipgloss.NewStyle().Foreground(cSecondary).Bold(true)
@@ -112,31 +91,11 @@ var (
 	styleHighlight = lipgloss.NewStyle().Background(lipgloss.Color("201")).Foreground(lipgloss.Color("255")).Bold(true)
 )
 
-// --- LOG PARSING ---
-var (
-	logLevelRegex  = regexp.MustCompile(`(?i)\b(FATAL|ERROR|ERR|WARN|WARNING|INFO|DEBUG|TRACE)\b`)
-	podPrefixRegex = regexp.MustCompile(`^\[([^/]+)/([^/]+)/([^\]]+)\]\s*(.*)$`)
-)
-
-func init() {
-	_ = styles.Get("dracula")
-}
-
 // --- DATA MODEL ---
 type item struct {
 	Type   string // DEP, POD, HELM, SEC, CM, HDR
 	Name   string
 	Status string
-}
-
-type logLineInfo struct {
-	OriginalLine  string
-	PodPrefix     string // e.g., "nginx-deployment-5c7588df-abc123/nginx"
-	PodName       string
-	ContainerName string
-	LogContent    string
-	LogLevel      string // ERROR, WARN, INFO, DEBUG, etc.
-	IsJSON        bool
 }
 
 type multiContainerCache struct {
@@ -519,7 +478,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rawContent = fmt.Sprintf("Error: %v", msg.err)
 		} else {
 			if msg.isYaml {
-				m.rawContent = highlight(msg.content, "yaml")
+				m.rawContent = parser.Highlight(msg.content, "yaml")
 			} else {
 				// Determine if this is log content
 				currentItem := item{}
@@ -532,8 +491,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if isLogContent {
 					m.logSource = msg.content
-					m.rawContent = processLogContent(msg.content, currentItem.Type,
-						currentItem.Name, m.logFormatMode)
+					m.rawContent = parser.ProcessLogContent(msg.content, currentItem.Type,
+						currentItem.Name, m.logFormatMode, parser.Highlight)
 				} else {
 					m.rawContent = msg.content
 				}
@@ -794,7 +753,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Re-render the current logs now rather than at the next refresh
 			if m.logSource != "" && len(m.items) > 0 {
 				curr := m.items[m.cursor]
-				m.rawContent = processLogContent(m.logSource, curr.Type, curr.Name, m.logFormatMode)
+				m.rawContent = parser.ProcessLogContent(m.logSource, curr.Type, curr.Name, m.logFormatMode, parser.Highlight)
 			}
 			m.updateViewportContent()
 			return m, nil
@@ -1698,15 +1657,6 @@ func fetchSelectorLogs(ctx context.Context, selector string, tailLines int) (str
 	return sb.String(), nil
 }
 
-func highlight(content, format string) string {
-	var buf bytes.Buffer
-	err := quick.Highlight(&buf, content, format, "terminal256", "dracula")
-	if err != nil {
-		return content
-	}
-	return buf.String()
-}
-
 // Generated name suffixes: ReplicaSets are "<deployment>-<pod-template-hash>",
 // Pods are "<deployment>-<pod-template-hash>-<random>"
 var (
@@ -1852,154 +1802,6 @@ func (m *model) getFilteredSuggestions() ([]string, int) {
 	return m.suggestions[start : start+MaxSuggestions], start
 }
 
-// --- LOG PROCESSING FUNCTIONS ---
-
-// parseLogLine extracts components from a log line
-func parseLogLine(line string) logLineInfo {
-	info := logLineInfo{
-		OriginalLine: line,
-		LogContent:   line,
-	}
-
-	// Try to extract pod prefix [pod/podname/container] or [podname/container]
-	if matches := podPrefixRegex.FindStringSubmatch(line); len(matches) == 5 {
-		// kubectl --prefix format: [pod/podname/container]
-		info.PodPrefix = matches[2] + "/" + matches[3]
-		info.PodName = matches[2]
-		info.ContainerName = matches[3]
-		info.LogContent = matches[4]
-	}
-
-	// Detect log level
-	if levelMatches := logLevelRegex.FindStringSubmatch(info.LogContent); len(levelMatches) > 1 {
-		info.LogLevel = strings.ToUpper(levelMatches[1])
-	}
-
-	// Detect JSON
-	trimmed := strings.TrimSpace(info.LogContent)
-	info.IsJSON = (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
-		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))
-
-	return info
-}
-
-// getPodColor returns a consistent color for a pod name using hash
-func getPodColor(podName string) lipgloss.Color {
-	hash := 0
-	for _, c := range podName {
-		hash = (hash*31 + int(c)) % len(podColorPalette)
-	}
-	if hash < 0 {
-		hash = -hash
-	}
-	return podColorPalette[hash%len(podColorPalette)]
-}
-
-// getLogLevelColor returns the color for a log level
-func getLogLevelColor(level string) lipgloss.Color {
-	normalized := strings.ToUpper(strings.TrimSpace(level))
-	switch normalized {
-	case "FATAL", "ERROR", "ERR":
-		return cRed
-	case "WARN", "WARNING":
-		return cYellow
-	case "INFO":
-		return lipgloss.Color("39") // Cyan
-	case "DEBUG":
-		return cGray
-	case "TRACE":
-		return lipgloss.Color("238") // Darker gray
-	default:
-		return lipgloss.Color("255") // Default white
-	}
-}
-
-// shortenPodPrefix extracts replicaset hash and pod suffix
-func shortenPodPrefix(podName, containerName string) string {
-	// Pod format: deployment-replicasethash-podhash
-	// Example: third-service-55c74d7f8-zn5fd
-	// We want: [55c74d7f8-zn5fd]
-	// (deployment name is redundant since we're already viewing that deployment)
-
-	parts := strings.Split(podName, "-")
-	if len(parts) < 3 {
-		// If pod name doesn't follow expected format, return as-is
-		return fmt.Sprintf("[%s]", podName)
-	}
-
-	// Extract replicaset hash (second to last part)
-	replicaSetHash := parts[len(parts)-2]
-
-	// Extract unique pod suffix (last part)
-	podSuffix := parts[len(parts)-1]
-
-	return fmt.Sprintf("[%s-%s]", replicaSetHash, podSuffix)
-}
-
-// formatPodPrefix formats pod prefix with color and icon
-func formatPodPrefix(podName, containerName string) string {
-	shortened := shortenPodPrefix(podName, containerName)
-	color := getPodColor(podName)
-	icon := "●"
-
-	style := lipgloss.NewStyle().Foreground(color).Bold(true)
-	return style.Render(icon + " " + shortened)
-}
-
-// colorizeLogLevel applies color to log level keywords in a line
-func colorizeLogLevel(line string) string {
-	matches := logLevelRegex.FindAllStringIndex(line, -1)
-	if len(matches) == 0 {
-		return line
-	}
-
-	var result strings.Builder
-	lastIndex := 0
-
-	for _, match := range matches {
-		start, end := match[0], match[1]
-
-		// Write content before match
-		result.WriteString(line[lastIndex:start])
-
-		// Colorize the level
-		level := line[start:end]
-		color := getLogLevelColor(level)
-		style := lipgloss.NewStyle().Foreground(color).Bold(true)
-		result.WriteString(style.Render(level))
-
-		lastIndex = end
-	}
-
-	// Write remaining content
-	result.WriteString(line[lastIndex:])
-	return result.String()
-}
-
-// detectJSONLog checks if a line is JSON format
-func detectJSONLog(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	return (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
-		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))
-}
-
-// prettyPrintJSONLog formats and highlights JSON logs
-func prettyPrintJSONLog(line string) string {
-	// Try to parse and pretty-print JSON
-	var obj interface{}
-	if err := json.Unmarshal([]byte(line), &obj); err != nil {
-		return line // Return original if not valid JSON
-	}
-
-	pretty, err := json.MarshalIndent(obj, "", "  ")
-	if err != nil {
-		return line
-	}
-
-	// Apply Chroma syntax highlighting
-	return highlight(string(pretty), "json")
-}
-
 // prune drops cached entries for pods that are no longer listed, so the
 // cache doesn't grow forever as pods are replaced
 func (c *multiContainerCache) prune(items []item) {
@@ -2045,52 +1847,4 @@ func detectMultiContainer(podName string, cache *multiContainerCache) (bool, err
 	cache.mu.Unlock()
 
 	return isMulti, nil
-}
-
-// processLogContent is the master log processing function
-func processLogContent(content, resourceType, resourceName string, formatMode bool) string {
-	if !formatMode {
-		return content // Raw mode - return unchanged
-	}
-
-	lines := strings.Split(content, "\n")
-	processed := make([]string, 0, len(lines))
-
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			processed = append(processed, line)
-			continue
-		}
-
-		// Parse line structure
-		info := parseLogLine(line)
-
-		// Check if JSON
-		if detectJSONLog(info.LogContent) {
-			// Format as JSON
-			formatted := prettyPrintJSONLog(info.LogContent)
-			if info.PodPrefix != "" {
-				prefix := formatPodPrefix(info.PodName, info.ContainerName)
-				processed = append(processed, prefix+" "+formatted)
-			} else {
-				processed = append(processed, formatted)
-			}
-		} else {
-			// Standard text log with level coloring
-			formattedLine := line
-
-			// Add pod prefix formatting if present
-			if info.PodPrefix != "" {
-				prefix := formatPodPrefix(info.PodName, info.ContainerName)
-				colorizedContent := colorizeLogLevel(info.LogContent)
-				formattedLine = prefix + " " + colorizedContent
-			} else {
-				formattedLine = colorizeLogLevel(line)
-			}
-
-			processed = append(processed, formattedLine)
-		}
-	}
-
-	return strings.Join(processed, "\n")
 }

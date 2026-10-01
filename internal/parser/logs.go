@@ -1,24 +1,12 @@
 package parser
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
-)
-
-// Constants for log processing
-const (
-	PodPrefixSuffixLen  = 7
-	MaxPodPrefixDisplay = 20
-	JSONIndent          = 2
-	CommandTimeout      = 2 * time.Second
 )
 
 // Color palette
@@ -57,19 +45,6 @@ type LogLineInfo struct {
 	LogContent    string
 	LogLevel      string // ERROR, WARN, INFO, DEBUG, etc.
 	IsJSON        bool
-}
-
-// MultiContainerCache caches pod container information
-type MultiContainerCache struct {
-	mu    sync.RWMutex
-	cache map[string]bool // podName -> hasMultipleContainers
-}
-
-// NewMultiContainerCache creates a new cache
-func NewMultiContainerCache() *MultiContainerCache {
-	return &MultiContainerCache{
-		cache: make(map[string]bool),
-	}
 }
 
 // ParseLogLine extracts components from a log line
@@ -216,41 +191,6 @@ func PrettyPrintJSONLog(line string) string {
 	}
 
 	return string(pretty)
-}
-
-// DetectMultiContainer checks if a pod has multiple containers (with caching)
-// Note: This function requires kubectl and cluster context
-func DetectMultiContainer(podName, namespace, kubeContext string, cache *MultiContainerCache) (bool, error) {
-	// Check cache first
-	cache.mu.RLock()
-	if result, exists := cache.cache[podName]; exists {
-		cache.mu.RUnlock()
-		return result, nil
-	}
-	cache.mu.RUnlock()
-
-	// Query kubectl
-	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "pod", podName,
-		"-n", namespace, "--context", kubeContext,
-		"-o", "jsonpath={.spec.containers[*].name}")
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, err
-	}
-
-	containerNames := strings.Fields(string(out))
-	isMulti := len(containerNames) > 1
-
-	// Cache result
-	cache.mu.Lock()
-	cache.cache[podName] = isMulti
-	cache.mu.Unlock()
-
-	return isMulti, nil
 }
 
 // ProcessLogContent is the master log processing function
