@@ -24,6 +24,7 @@ type Client interface {
 	ListPods(ctx context.Context, namespace, selector string) ([]byte, error)
 	GetPodLogs(ctx context.Context, namespace, podName string, tailLines int, allContainers, prefix bool) ([]byte, error)
 	GetPodContainers(ctx context.Context, namespace, podName string) ([]string, error)
+	GetPod(ctx context.Context, namespace, podName string) ([]byte, error)
 
 	// Helm operations
 	GetHelmHistory(ctx context.Context, namespace, releaseName string) ([]byte, error)

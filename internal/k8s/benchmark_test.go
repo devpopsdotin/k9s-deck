@@ -34,10 +34,7 @@ func BenchmarkClientGoClient_GetDeployment(b *testing.B) {
 		b.Skip("Skipping benchmark in short mode")
 	}
 
-	client, err := NewClientGoClient("")
-	if err != nil {
-		b.Fatalf("Failed to create client: %v", err)
-	}
+	client := newTestClient(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -76,10 +73,7 @@ func BenchmarkClientGoClient_ListDeployments(b *testing.B) {
 		b.Skip("Skipping benchmark in short mode")
 	}
 
-	client, err := NewClientGoClient("")
-	if err != nil {
-		b.Fatalf("Failed to create client: %v", err)
-	}
+	client := newTestClient(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -118,10 +112,7 @@ func BenchmarkClientGoClient_ListPods(b *testing.B) {
 		b.Skip("Skipping benchmark in short mode")
 	}
 
-	client, err := NewClientGoClient("")
-	if err != nil {
-		b.Fatalf("Failed to create client: %v", err)
-	}
+	client := newTestClient(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -160,10 +151,7 @@ func BenchmarkClientGoClient_GetEvents(b *testing.B) {
 		b.Skip("Skipping benchmark in short mode")
 	}
 
-	client, err := NewClientGoClient("")
-	if err != nil {
-		b.Fatalf("Failed to create client: %v", err)
-	}
+	client := newTestClient(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

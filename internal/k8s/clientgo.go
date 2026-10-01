@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
 	"sigs.k8s.io/yaml"
 )
 
@@ -28,12 +26,9 @@ type ClientGoClient struct {
 
 // NewClientGoClient creates a new client-go based client
 func NewClientGoClient(kubeContext string) (*ClientGoClient, error) {
-	kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
-
-	// Load config with specific context
-	configLoadingRules := &clientcmd.ClientConfigLoadingRules{
-		ExplicitPath: kubeconfig,
-	}
+	// Standard kubectl loading rules: honors $KUBECONFIG (including multiple
+	// colon-separated files) and falls back to ~/.kube/config
+	configLoadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	configOverrides := &clientcmd.ConfigOverrides{}
 	if kubeContext != "" {
 		configOverrides.CurrentContext = kubeContext
@@ -209,8 +204,13 @@ func (c *ClientGoClient) GetPodLogs(ctx context.Context, namespace, podName stri
 			return nil, err
 		}
 
+		// Init containers first, matching kubectl logs --all-containers
+		containers := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+
 		// Fetch logs for each container
-		for _, container := range pod.Spec.Containers {
+		var lastErr error
+		succeeded := 0
+		for _, container := range containers {
 			tailLinesPtr := int64(tailLines)
 			podLogOpts := &corev1.PodLogOptions{
 				Container: container.Name,
@@ -219,15 +219,20 @@ func (c *ClientGoClient) GetPodLogs(ctx context.Context, namespace, podName stri
 
 			stream, err := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, podLogOpts).Stream(ctx)
 			if err != nil {
-				continue // Skip failed containers
+				// Skip containers without logs (e.g. not started yet)
+				slog.Debug("failed to stream container logs", "pod", podName, "container", container.Name, "error", err)
+				lastErr = err
+				continue
 			}
 
 			// Read all logs from stream
 			containerLogs, err := io.ReadAll(stream)
 			stream.Close()
 			if err != nil {
+				lastErr = err
 				continue
 			}
+			succeeded++
 
 			// Add prefix if requested
 			if prefix {
@@ -241,6 +246,11 @@ func (c *ClientGoClient) GetPodLogs(ctx context.Context, namespace, podName stri
 			} else {
 				logs = append(logs, containerLogs...)
 			}
+		}
+
+		// Surface the error instead of an empty view when no container worked
+		if succeeded == 0 && lastErr != nil {
+			return nil, lastErr
 		}
 	} else {
 		// Single container (or default)
@@ -282,6 +292,22 @@ func (c *ClientGoClient) GetPodContainers(ctx context.Context, namespace, podNam
 	}
 
 	return names, nil
+}
+
+// GetPod retrieves a pod as YAML
+func (c *ClientGoClient) GetPod(ctx context.Context, namespace, podName string) ([]byte, error) {
+	pod, err := c.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, HandleK8sError(err, "pod", podName)
+	}
+
+	// Match kubectl get pod -o yaml: typed clients leave TypeMeta empty, and
+	// kubectl hides managedFields by default
+	pod.APIVersion = "v1"
+	pod.Kind = "Pod"
+	pod.ManagedFields = nil
+
+	return yaml.Marshal(pod)
 }
 
 // ============================================================================

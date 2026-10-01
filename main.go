@@ -164,7 +164,8 @@ type model struct {
 	filterRegex  *regexp.Regexp
 
 	// LSP-like autocomplete
-	suggestions     []string // Available deployment names for autocomplete
+	allSuggestions  []string // Full candidate list for autocomplete (unfiltered)
+	suggestions     []string // Candidates matching the current input
 	suggestionIndex int      // Currently selected suggestion
 	showSuggestions bool     // Whether to show autocomplete suggestions
 
@@ -175,6 +176,11 @@ type model struct {
 	height     int
 	lastUpd    time.Time
 	err        error
+
+	// Refresh sequencing: fetchSeq is the last fetch issued, appliedSeq the
+	// last result applied. They differ while a fetch is in flight.
+	fetchSeq   int
+	appliedSeq int
 
 	// Log formatting
 	logFormatMode      bool                 // true=formatted, false=raw
@@ -187,6 +193,7 @@ type model struct {
 // --- MESSAGES ---
 type tickMsg time.Time
 type dataMsg struct {
+	seq          int
 	items        []item
 	selectors    map[string]string
 	helmReleases map[string]string
@@ -230,7 +237,7 @@ func main() {
 		Deployment = os.Args[3]
 	}
 
-	// Initialize logger (writes to /tmp/k9s-deck.log)
+	// Initialize logger (writes to logger.LogPath(), /tmp/k9s-deck.log on Unix)
 	if err := logger.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize logger: %v\n", err)
 		// Continue anyway - logging is not critical
@@ -270,11 +277,18 @@ func initialModel() model {
 		multiContainerInfo: &multiContainerCache{
 			cache: make(map[string]bool),
 		},
+		fetchSeq: 1, // Init issues fetch #1
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchDataCmd(m.targets, m.selectors), tickCmd(), textinput.Blink)
+	return tea.Batch(fetchDataCmd(m.targets, m.fetchSeq), tickCmd(), textinput.Blink)
+}
+
+// startFetch issues a new data refresh tagged with the next sequence number
+func (m *model) startFetch() tea.Cmd {
+	m.fetchSeq++
+	return fetchDataCmd(m.targets, m.fetchSeq)
 }
 
 // copySelectorMap creates a copy of selectors map to avoid concurrent access issues
@@ -326,10 +340,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- SYSTEM MESSAGES ---
 	switch msg := msg.(type) {
 	case tickMsg:
-		return m, tea.Batch(fetchDataCmd(m.targets, m.selectors), tickCmd())
+		// Skip this tick's refresh if the previous one is still in flight,
+		// so slow API responses don't pile up requests
+		if m.appliedSeq < m.fetchSeq {
+			return m, tickCmd()
+		}
+		return m, tea.Batch(m.startFetch(), tickCmd())
 
 	case commandFinishedMsg:
-		return m, fetchDataCmd(m.targets, m.selectors)
+		return m, m.startFetch()
 
 	case addTargetMsg:
 		// Check duplicates
@@ -343,7 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !exists {
 			m.targets = append(m.targets, msg.name)
 		}
-		return m, fetchDataCmd(m.targets, m.selectors)
+		return m, m.startFetch()
 
 	case removeTargetMsg:
 		// Remove target from list
@@ -361,7 +380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.targets) == 0 {
 			m.cursor = 0
 		}
-		return m, fetchDataCmd(m.targets, m.selectors)
+		return m, m.startFetch()
 
 	case suggestionsMsg:
 		// Update available deployment suggestions (only for add mode)
@@ -380,7 +399,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					filtered = append(filtered, deployment)
 				}
 			}
-			m.suggestions = filtered
+			m.allSuggestions = filtered
 			m.updateSuggestions()
 		}
 		// For remove mode, suggestions are already populated with current targets
@@ -424,51 +443,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dataMsg:
+		// Drop results that arrive after a newer fetch was already applied
+		if msg.seq <= m.appliedSeq {
+			return m, nil
+		}
+		m.appliedSeq = msg.seq
 		m.lastUpd = time.Now()
-		if msg.err != nil {
-			m.err = msg.err
-		} else {
-			m.err = nil
+		// Record any error, but still apply the items: a failing target is
+		// rendered as an "(Err)" header and must not freeze the other targets.
+		m.err = msg.err
 
-			// Remember current selection before updating items
-			var currentSelection *item
-			if len(m.items) > 0 && m.cursor < len(m.items) {
-				currentSelection = &m.items[m.cursor]
-			}
+		// Remember current selection before updating items
+		var currentSelection *item
+		if len(m.items) > 0 && m.cursor < len(m.items) {
+			currentSelection = &m.items[m.cursor]
+		}
 
-			m.items = msg.items
-			// Merge maps
-			for k, v := range msg.selectors {
-				m.selectors[k] = v
-			}
-			for k, v := range msg.helmReleases {
-				m.helmReleases[k] = v
-			}
+		m.items = msg.items
+		m.multiContainerInfo.prune(m.items)
+		// Merge maps
+		for k, v := range msg.selectors {
+			m.selectors[k] = v
+		}
+		for k, v := range msg.helmReleases {
+			m.helmReleases[k] = v
+		}
 
-			// Try to restore cursor to the same item
-			if currentSelection != nil && len(m.items) > 0 {
-				newCursor := -1
-				for i, item := range m.items {
-					if item.Type == currentSelection.Type && item.Name == currentSelection.Name {
-						newCursor = i
-						break
-					}
+		// Try to restore cursor to the same item
+		if currentSelection != nil && len(m.items) > 0 {
+			newCursor := -1
+			for i, item := range m.items {
+				if item.Type == currentSelection.Type && item.Name == currentSelection.Name {
+					newCursor = i
+					break
 				}
-				if newCursor != -1 {
-					m.cursor = newCursor
-				} else {
-					// Item not found, validate bounds
-					m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
-				}
+			}
+			if newCursor != -1 {
+				m.cursor = newCursor
 			} else {
-				// Validate cursor position for new or empty selections
+				// Item not found, validate bounds
 				m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
 			}
+		} else {
+			// Validate cursor position for new or empty selections
+			m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
+		}
 
-			// Always refresh details - pass a copy of selectors to avoid race
-			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
-			}
+		// Always refresh details - pass a copy of selectors to avoid race
+		if len(m.items) > 0 {
+			cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -565,8 +588,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, nil
 						}
 						// Simple validation - check if it's a number
-						if strings.TrimSpace(val) == "" || !isPositiveInteger(val) {
-							m.rawContent = "Scale value must be a positive integer"
+						if !isNonNegativeInteger(val) {
+							m.rawContent = "Scale value must be a non-negative integer"
 							m.updateViewportContent()
 							return m, nil
 						}
@@ -622,8 +645,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					// Special handling for :add and :remove which need to return a Msg, not a Cmd
 					parts := strings.Fields(val)
+					if len(parts) == 0 {
+						// Empty command - nothing to do
+						return m, nil
+					}
 					if len(parts) >= 2 && parts[0] == "add" {
-						return m, func() tea.Msg { return addTargetMsg{name: parts[1]} }
+						name := parts[1]
+						if !isValidK8sName(name) {
+							m.rawContent = "Invalid deployment name. Must be lowercase alphanumeric with hyphens only."
+							m.updateViewportContent()
+							return m, nil
+						}
+						return m, func() tea.Msg { return addTargetMsg{name: name} }
 					}
 					if parts[0] == "remove" {
 						var targetToRemove string
@@ -674,6 +707,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Reset()
 				// Reset autocomplete state
 				m.showSuggestions = false
+				m.allSuggestions = []string{}
 				m.suggestions = []string{}
 				m.suggestionIndex = 0
 				return m, nil
@@ -724,7 +758,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "ctrl+f":
-			cmds = append(cmds, fetchDataCmd(m.targets, m.selectors))
+			cmds = append(cmds, m.startFetch())
 
 		case "f":
 			// Toggle log format mode
@@ -758,8 +792,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.textInput.Focus()
 			// Reset suggestions state and populate with current targets
-			m.suggestions = make([]string, len(m.targets))
-			copy(m.suggestions, m.targets)
+			m.allSuggestions = append([]string(nil), m.targets...)
+			m.suggestions = append([]string(nil), m.targets...)
 			m.suggestionIndex = 0
 			m.showSuggestions = len(m.suggestions) > 0
 			return m, textinput.Blink
@@ -799,6 +833,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.textInput.Focus()
 			// Reset suggestions state
+			m.allSuggestions = []string{}
 			m.suggestions = []string{}
 			m.suggestionIndex = 0
 			m.showSuggestions = false
@@ -1164,13 +1199,6 @@ func (m model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, mainContent, footer)
 }
 
-func runCmd(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.CombinedOutput()
-}
-
 // fetchAvailableDeployments gets all deployments in the current namespace
 func fetchAvailableDeployments() tea.Cmd {
 	return func() tea.Msg {
@@ -1207,8 +1235,24 @@ func copyToClipboard(content string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		cmd = exec.Command("pbcopy")
-	case "linux":
-		cmd = exec.Command("xclip", "-selection", "clipboard")
+	case "linux", "freebsd", "openbsd", "netbsd":
+		// Prefer the Wayland tool on Wayland sessions, then the X11 tools
+		var candidates [][]string
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			candidates = append(candidates, []string{"wl-copy"})
+		}
+		candidates = append(candidates,
+			[]string{"xclip", "-selection", "clipboard"},
+			[]string{"xsel", "--clipboard", "--input"})
+		for _, c := range candidates {
+			if _, err := exec.LookPath(c[0]); err == nil {
+				cmd = exec.Command(c[0], c[1:]...)
+				break
+			}
+		}
+		if cmd == nil {
+			return fmt.Errorf("no clipboard tool found (install wl-copy, xclip or xsel)")
+		}
 	case "windows":
 		cmd = exec.Command("clip")
 	default:
@@ -1249,7 +1293,7 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 				return detailsMsg{err: fmt.Errorf("No deployment selected")}
 			}
 			replicas := 0
-			if _, err := fmt.Sscanf(parts[1], "%d", &replicas); err != nil {
+			if _, err := fmt.Sscanf(parts[1], "%d", &replicas); err != nil || replicas < 0 {
 				return detailsMsg{err: fmt.Errorf("Invalid replica count: %s", parts[1])}
 			}
 			err := client.ScaleDeployment(ctx, Namespace, deploymentName, replicas)
@@ -1283,10 +1327,11 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 			}
 			return commandFinishedMsg{}
 		case "fetch":
+			// No tickCmd here: the existing tick loop keeps running, and starting
+			// another would permanently add a second refresh loop
 			return tea.Batch(
 				func() tea.Msg { return detailsMsg{content: "Manual Refresh...", isYaml: false} },
 				func() tea.Msg { return commandFinishedMsg{} },
-				tickCmd(),
 			)()
 		default:
 			return detailsMsg{err: fmt.Errorf("Unknown command: %s", verb)}
@@ -1294,7 +1339,7 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 	}
 }
 
-func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
+func fetchDataCmd(targets []string, seq int) tea.Cmd {
 	return func() tea.Msg {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -1319,7 +1364,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 					mu.Lock()
 					targetItems[tName] = []item{{Type: "HDR", Name: fmt.Sprintf("=== %s (Err) ===", tName)}}
 					if combinedErr == nil {
-						combinedErr = depErr
+						combinedErr = fmt.Errorf("%s: %w", tName, depErr)
 					}
 					mu.Unlock()
 					return
@@ -1456,14 +1501,17 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 
 		// Assemble items in consistent order (sorted by target name)
 		var globalItems []item
-		sort.Strings(targets) // Ensure consistent target order
-		for _, tName := range targets {
+		// Sort a copy: targets shares its backing array with the model, which
+		// the UI goroutine reads and appends to concurrently
+		sortedTargets := append([]string(nil), targets...)
+		sort.Strings(sortedTargets) // Ensure consistent target order
+		for _, tName := range sortedTargets {
 			if items, exists := targetItems[tName]; exists {
 				globalItems = append(globalItems, items...)
 			}
 		}
 
-		return dataMsg{items: globalItems, selectors: updatedSelectors, helmReleases: updatedHelm, err: combinedErr}
+		return dataMsg{seq: seq, items: globalItems, selectors: updatedSelectors, helmReleases: updatedHelm, err: combinedErr}
 	}
 }
 
@@ -1489,8 +1537,9 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				var events []string
 				events = append(events, fmt.Sprintf("%-25s %-10s %-15s %s", "TIMESTAMP", "TYPE", "REASON", "MESSAGE"))
 				gjson.Get(string(out), "items").ForEach(func(_, e gjson.Result) bool {
+					kind := e.Get("involvedObject.kind").String()
 					objName := e.Get("involvedObject.name").String()
-					if strings.Contains(objName, i.Name) {
+					if isDeploymentEvent(kind, objName, i.Name) {
 						ts := e.Get("lastTimestamp").String()
 						if ts == "" {
 							ts = e.Get("eventTime").String()
@@ -1511,11 +1560,11 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				}
 
 				// Get logs from all pods using cached label selector
-				out, err = runCmd("kubectl", "logs", "-l", selector, "-n", Namespace, "--context", Context, "--all-containers=true", "--prefix", fmt.Sprintf("--tail=%d", DeploymentLogTail))
+				logs, err := fetchSelectorLogs(ctx, selector, DeploymentLogTail)
 				if err != nil {
 					return detailsMsg{err: fmt.Errorf("Logs Err: %v", err)}
 				}
-				return detailsMsg{content: string(out), isYaml: false}
+				return detailsMsg{content: logs, isYaml: false}
 			}
 		}
 
@@ -1561,8 +1610,8 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 			}
 			isYaml = true
 		} else {
-			// For POD YAML, use kubectl for now (no GetPod method yet)
-			out, err = runCmd("kubectl", "get", "pod", i.Name, "-n", Namespace, "--context", Context, "-o", "yaml")
+			// POD YAML (tab == 0)
+			out, err = client.GetPod(ctx, Namespace, i.Name)
 		}
 
 		if err != nil {
@@ -1572,6 +1621,52 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 	}
 }
 
+// fetchSelectorLogs returns the prefixed logs of all containers of all pods
+// matching selector (the client-go equivalent of
+// kubectl logs -l <selector> --all-containers --prefix)
+func fetchSelectorLogs(ctx context.Context, selector string, tailLines int) (string, error) {
+	podsOut, err := client.ListPods(ctx, Namespace, selector)
+	if err != nil {
+		return "", err
+	}
+	var podNames []string
+	gjson.Get(string(podsOut), "items.#.metadata.name").ForEach(func(_, v gjson.Result) bool {
+		podNames = append(podNames, v.String())
+		return true
+	})
+	sort.Strings(podNames)
+
+	// Fetch pods concurrently so many replicas fit within the timeout
+	results := make([][]byte, len(podNames))
+	errs := make([]error, len(podNames))
+	var wg sync.WaitGroup
+	for idx, name := range podNames {
+		wg.Add(1)
+		go func(idx int, name string) {
+			defer wg.Done()
+			results[idx], errs[idx] = client.GetPodLogs(ctx, Namespace, name, tailLines, true, true)
+		}(idx, name)
+	}
+	wg.Wait()
+
+	var sb strings.Builder
+	var firstErr error
+	for idx := range podNames {
+		if errs[idx] != nil {
+			if firstErr == nil {
+				firstErr = errs[idx]
+			}
+			continue
+		}
+		sb.Write(results[idx])
+	}
+	// Only fail when there were pods and none of them returned logs
+	if sb.Len() == 0 && firstErr != nil {
+		return "", firstErr
+	}
+	return sb.String(), nil
+}
+
 func highlight(content, format string) string {
 	var buf bytes.Buffer
 	err := quick.Highlight(&buf, content, format, "terminal256", "dracula")
@@ -1579,6 +1674,33 @@ func highlight(content, format string) string {
 		return content
 	}
 	return buf.String()
+}
+
+// Generated name suffixes: ReplicaSets are "<deployment>-<pod-template-hash>",
+// Pods are "<deployment>-<pod-template-hash>-<random>"
+var (
+	replicaSetSuffixRegex = regexp.MustCompile(`^[a-z0-9]{6,10}$`)
+	podSuffixRegex        = regexp.MustCompile(`^[a-z0-9]{6,10}-[a-z0-9]{5}$`)
+)
+
+// isDeploymentEvent reports whether an event's involved object is the
+// deployment itself or one of its ReplicaSets/Pods. A plain substring match
+// would also pick up events of other deployments sharing a name prefix.
+func isDeploymentEvent(kind, objName, deployment string) bool {
+	switch kind {
+	case "Deployment":
+		return objName == deployment
+	case "ReplicaSet", "Pod":
+		suffix, ok := strings.CutPrefix(objName, deployment+"-")
+		if !ok {
+			return false
+		}
+		if kind == "ReplicaSet" {
+			return replicaSetSuffixRegex.MatchString(suffix)
+		}
+		return podSuffixRegex.MatchString(suffix)
+	}
+	return false
 }
 
 func getCurrentDeploymentName(items []item, cursor int) string {
@@ -1610,7 +1732,12 @@ func getCurrentHelmRelease(items []item, cursor int, helmReleases map[string]str
 
 func isPositiveInteger(s string) bool {
 	s = strings.TrimSpace(s)
-	if s == "" || s == "0" {
+	return isNonNegativeInteger(s) && strings.Trim(s, "0") != ""
+}
+
+func isNonNegativeInteger(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
 		return false
 	}
 	for _, r := range s {
@@ -1640,20 +1767,16 @@ func isValidK8sName(name string) bool {
 
 // updateSuggestions filters the available suggestions based on current input
 func (m *model) updateSuggestions() {
-	if (m.shortcutMode != "add" && m.shortcutMode != "remove") || len(m.suggestions) == 0 {
+	if (m.shortcutMode != "add" && m.shortcutMode != "remove") || len(m.allSuggestions) == 0 {
+		m.suggestions = []string{}
 		m.showSuggestions = false
 		return
 	}
 
 	input := strings.ToLower(strings.TrimSpace(m.textInput.Value()))
-	if input == "" {
-		m.showSuggestions = true
-		m.suggestionIndex = 0
-		return
-	}
 
-	// Filter suggestions that contain the input
-	filtered := make([]string, 0, len(m.suggestions))
+	// Always filter from the full list so deleting input restores candidates
+	filtered := make([]string, 0, len(m.allSuggestions))
 
 	// Build a map of targets for O(1) lookup instead of O(n)
 	targetMap := make(map[string]bool, len(m.targets))
@@ -1661,7 +1784,7 @@ func (m *model) updateSuggestions() {
 		targetMap[target] = true
 	}
 
-	for _, suggestion := range m.suggestions {
+	for _, suggestion := range m.allSuggestions {
 		if strings.Contains(strings.ToLower(suggestion), input) {
 			if m.shortcutMode == "add" {
 				// For add mode: Don't suggest deployments already being monitored
@@ -1838,6 +1961,24 @@ func prettyPrintJSONLog(line string) string {
 
 	// Apply Chroma syntax highlighting
 	return highlight(string(pretty), "json")
+}
+
+// prune drops cached entries for pods that are no longer listed, so the
+// cache doesn't grow forever as pods are replaced
+func (c *multiContainerCache) prune(items []item) {
+	live := make(map[string]bool)
+	for _, it := range items {
+		if it.Type == "POD" {
+			live[it.Name] = true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for podName := range c.cache {
+		if !live[podName] {
+			delete(c.cache, podName)
+		}
+	}
 }
 
 // detectMultiContainer checks if a pod has multiple containers (with caching)
