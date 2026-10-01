@@ -164,7 +164,8 @@ type model struct {
 	filterRegex  *regexp.Regexp
 
 	// LSP-like autocomplete
-	suggestions     []string // Available deployment names for autocomplete
+	allSuggestions  []string // Full candidate list for autocomplete (unfiltered)
+	suggestions     []string // Candidates matching the current input
 	suggestionIndex int      // Currently selected suggestion
 	showSuggestions bool     // Whether to show autocomplete suggestions
 
@@ -380,7 +381,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					filtered = append(filtered, deployment)
 				}
 			}
-			m.suggestions = filtered
+			m.allSuggestions = filtered
 			m.updateSuggestions()
 		}
 		// For remove mode, suggestions are already populated with current targets
@@ -682,6 +683,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Reset()
 				// Reset autocomplete state
 				m.showSuggestions = false
+				m.allSuggestions = []string{}
 				m.suggestions = []string{}
 				m.suggestionIndex = 0
 				return m, nil
@@ -766,8 +768,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.textInput.Focus()
 			// Reset suggestions state and populate with current targets
-			m.suggestions = make([]string, len(m.targets))
-			copy(m.suggestions, m.targets)
+			m.allSuggestions = append([]string(nil), m.targets...)
+			m.suggestions = append([]string(nil), m.targets...)
 			m.suggestionIndex = 0
 			m.showSuggestions = len(m.suggestions) > 0
 			return m, textinput.Blink
@@ -807,6 +809,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.textInput.Focus()
 			// Reset suggestions state
+			m.allSuggestions = []string{}
 			m.suggestions = []string{}
 			m.suggestionIndex = 0
 			m.showSuggestions = false
@@ -1652,20 +1655,16 @@ func isValidK8sName(name string) bool {
 
 // updateSuggestions filters the available suggestions based on current input
 func (m *model) updateSuggestions() {
-	if (m.shortcutMode != "add" && m.shortcutMode != "remove") || len(m.suggestions) == 0 {
+	if (m.shortcutMode != "add" && m.shortcutMode != "remove") || len(m.allSuggestions) == 0 {
+		m.suggestions = []string{}
 		m.showSuggestions = false
 		return
 	}
 
 	input := strings.ToLower(strings.TrimSpace(m.textInput.Value()))
-	if input == "" {
-		m.showSuggestions = true
-		m.suggestionIndex = 0
-		return
-	}
 
-	// Filter suggestions that contain the input
-	filtered := make([]string, 0, len(m.suggestions))
+	// Always filter from the full list so deleting input restores candidates
+	filtered := make([]string, 0, len(m.allSuggestions))
 
 	// Build a map of targets for O(1) lookup instead of O(n)
 	targetMap := make(map[string]bool, len(m.targets))
@@ -1673,7 +1672,7 @@ func (m *model) updateSuggestions() {
 		targetMap[target] = true
 	}
 
-	for _, suggestion := range m.suggestions {
+	for _, suggestion := range m.allSuggestions {
 		if strings.Contains(strings.ToLower(suggestion), input) {
 			if m.shortcutMode == "add" {
 				// For add mode: Don't suggest deployments already being monitored
