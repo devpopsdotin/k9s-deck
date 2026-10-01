@@ -425,50 +425,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dataMsg:
 		m.lastUpd = time.Now()
-		if msg.err != nil {
-			m.err = msg.err
-		} else {
-			m.err = nil
+		// Record any error, but still apply the items: a failing target is
+		// rendered as an "(Err)" header and must not freeze the other targets.
+		m.err = msg.err
 
-			// Remember current selection before updating items
-			var currentSelection *item
-			if len(m.items) > 0 && m.cursor < len(m.items) {
-				currentSelection = &m.items[m.cursor]
-			}
+		// Remember current selection before updating items
+		var currentSelection *item
+		if len(m.items) > 0 && m.cursor < len(m.items) {
+			currentSelection = &m.items[m.cursor]
+		}
 
-			m.items = msg.items
-			// Merge maps
-			for k, v := range msg.selectors {
-				m.selectors[k] = v
-			}
-			for k, v := range msg.helmReleases {
-				m.helmReleases[k] = v
-			}
+		m.items = msg.items
+		// Merge maps
+		for k, v := range msg.selectors {
+			m.selectors[k] = v
+		}
+		for k, v := range msg.helmReleases {
+			m.helmReleases[k] = v
+		}
 
-			// Try to restore cursor to the same item
-			if currentSelection != nil && len(m.items) > 0 {
-				newCursor := -1
-				for i, item := range m.items {
-					if item.Type == currentSelection.Type && item.Name == currentSelection.Name {
-						newCursor = i
-						break
-					}
+		// Try to restore cursor to the same item
+		if currentSelection != nil && len(m.items) > 0 {
+			newCursor := -1
+			for i, item := range m.items {
+				if item.Type == currentSelection.Type && item.Name == currentSelection.Name {
+					newCursor = i
+					break
 				}
-				if newCursor != -1 {
-					m.cursor = newCursor
-				} else {
-					// Item not found, validate bounds
-					m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
-				}
+			}
+			if newCursor != -1 {
+				m.cursor = newCursor
 			} else {
-				// Validate cursor position for new or empty selections
+				// Item not found, validate bounds
 				m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
 			}
+		} else {
+			// Validate cursor position for new or empty selections
+			m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
+		}
 
-			// Always refresh details - pass a copy of selectors to avoid race
-			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
-			}
+		// Always refresh details - pass a copy of selectors to avoid race
+		if len(m.items) > 0 {
+			cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -627,7 +625,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					if len(parts) >= 2 && parts[0] == "add" {
-						return m, func() tea.Msg { return addTargetMsg{name: parts[1]} }
+						name := parts[1]
+						if !isValidK8sName(name) {
+							m.rawContent = "Invalid deployment name. Must be lowercase alphanumeric with hyphens only."
+							m.updateViewportContent()
+							return m, nil
+						}
+						return m, func() tea.Msg { return addTargetMsg{name: name} }
 					}
 					if parts[0] == "remove" {
 						var targetToRemove string
@@ -1323,7 +1327,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 					mu.Lock()
 					targetItems[tName] = []item{{Type: "HDR", Name: fmt.Sprintf("=== %s (Err) ===", tName)}}
 					if combinedErr == nil {
-						combinedErr = depErr
+						combinedErr = fmt.Errorf("%s: %w", tName, depErr)
 					}
 					mu.Unlock()
 					return
