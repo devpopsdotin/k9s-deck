@@ -577,6 +577,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.filterMode = false
 					m.updateViewportContent()
 				} else if m.shortcutMode != "" {
+					// Enter accepts the highlighted suggestion when the list is shown
+					if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions &&
+						m.suggestionIndex < len(m.suggestions) {
+						val = m.suggestions[m.suggestionIndex]
+					}
+					m.showSuggestions = false
+
 					// Handle shortcut mode input
 					m.textInput.Reset()
 					shortcut := m.shortcutMode
