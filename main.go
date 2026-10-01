@@ -1198,13 +1198,6 @@ func (m model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, mainContent, footer)
 }
 
-func runCmd(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.CombinedOutput()
-}
-
 // fetchAvailableDeployments gets all deployments in the current namespace
 func fetchAvailableDeployments() tea.Cmd {
 	return func() tea.Msg {
@@ -1550,11 +1543,11 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				}
 
 				// Get logs from all pods using cached label selector
-				out, err = runCmd("kubectl", "logs", "-l", selector, "-n", Namespace, "--context", Context, "--all-containers=true", "--prefix", fmt.Sprintf("--tail=%d", DeploymentLogTail))
+				logs, err := fetchSelectorLogs(ctx, selector, DeploymentLogTail)
 				if err != nil {
 					return detailsMsg{err: fmt.Errorf("Logs Err: %v", err)}
 				}
-				return detailsMsg{content: string(out), isYaml: false}
+				return detailsMsg{content: logs, isYaml: false}
 			}
 		}
 
@@ -1600,8 +1593,8 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 			}
 			isYaml = true
 		} else {
-			// For POD YAML, use kubectl for now (no GetPod method yet)
-			out, err = runCmd("kubectl", "get", "pod", i.Name, "-n", Namespace, "--context", Context, "-o", "yaml")
+			// POD YAML (tab == 0)
+			out, err = client.GetPod(ctx, Namespace, i.Name)
 		}
 
 		if err != nil {
@@ -1609,6 +1602,52 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 		}
 		return detailsMsg{content: string(out), isYaml: isYaml}
 	}
+}
+
+// fetchSelectorLogs returns the prefixed logs of all containers of all pods
+// matching selector (the client-go equivalent of
+// kubectl logs -l <selector> --all-containers --prefix)
+func fetchSelectorLogs(ctx context.Context, selector string, tailLines int) (string, error) {
+	podsOut, err := client.ListPods(ctx, Namespace, selector)
+	if err != nil {
+		return "", err
+	}
+	var podNames []string
+	gjson.Get(string(podsOut), "items.#.metadata.name").ForEach(func(_, v gjson.Result) bool {
+		podNames = append(podNames, v.String())
+		return true
+	})
+	sort.Strings(podNames)
+
+	// Fetch pods concurrently so many replicas fit within the timeout
+	results := make([][]byte, len(podNames))
+	errs := make([]error, len(podNames))
+	var wg sync.WaitGroup
+	for idx, name := range podNames {
+		wg.Add(1)
+		go func(idx int, name string) {
+			defer wg.Done()
+			results[idx], errs[idx] = client.GetPodLogs(ctx, Namespace, name, tailLines, true, true)
+		}(idx, name)
+	}
+	wg.Wait()
+
+	var sb strings.Builder
+	var firstErr error
+	for idx := range podNames {
+		if errs[idx] != nil {
+			if firstErr == nil {
+				firstErr = errs[idx]
+			}
+			continue
+		}
+		sb.Write(results[idx])
+	}
+	// Only fail when there were pods and none of them returned logs
+	if sb.Len() == 0 && firstErr != nil {
+		return "", firstErr
+	}
+	return sb.String(), nil
 }
 
 func highlight(content, format string) string {

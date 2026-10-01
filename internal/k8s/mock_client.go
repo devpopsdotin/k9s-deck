@@ -17,6 +17,7 @@ type MockClient struct {
 	ListPodsFunc         func(ctx context.Context, namespace, selector string) ([]byte, error)
 	GetPodLogsFunc       func(ctx context.Context, namespace, podName string, tailLines int, allContainers, prefix bool) ([]byte, error)
 	GetPodContainersFunc func(ctx context.Context, namespace, podName string) ([]string, error)
+	GetPodFunc           func(ctx context.Context, namespace, podName string) ([]byte, error)
 
 	// Helm operations
 	GetHelmHistoryFunc func(ctx context.Context, namespace, releaseName string) ([]byte, error)
@@ -87,6 +88,13 @@ func (m *MockClient) GetPodContainers(ctx context.Context, namespace, podName st
 		return m.GetPodContainersFunc(ctx, namespace, podName)
 	}
 	return nil, fmt.Errorf("GetPodContainersFunc not implemented")
+}
+
+func (m *MockClient) GetPod(ctx context.Context, namespace, podName string) ([]byte, error) {
+	if m.GetPodFunc != nil {
+		return m.GetPodFunc(ctx, namespace, podName)
+	}
+	return nil, fmt.Errorf("GetPodFunc not implemented")
 }
 
 // Helm operations

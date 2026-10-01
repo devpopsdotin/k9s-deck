@@ -47,6 +47,14 @@ func (c *KubectlClient) GetPodContainers(ctx context.Context, namespace, podName
 	return containerNames, nil
 }
 
+// GetPod fetches a pod as YAML
+func (c *KubectlClient) GetPod(ctx context.Context, namespace, podName string) ([]byte, error) {
+	return c.runCmd(ctx, "kubectl", "get", "pod", podName,
+		"-n", namespace,
+		"--context", c.Context,
+		"-o", "yaml")
+}
+
 // GetPodsBySelector fetches logs from all pods matching a selector
 func (c *KubectlClient) GetPodsBySelector(ctx context.Context, namespace, selector string, tailLines int) ([]byte, error) {
 	return c.runCmd(ctx, "kubectl", "logs",

@@ -294,6 +294,22 @@ func (c *ClientGoClient) GetPodContainers(ctx context.Context, namespace, podNam
 	return names, nil
 }
 
+// GetPod retrieves a pod as YAML
+func (c *ClientGoClient) GetPod(ctx context.Context, namespace, podName string) ([]byte, error) {
+	pod, err := c.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, HandleK8sError(err, "pod", podName)
+	}
+
+	// Match kubectl get pod -o yaml: typed clients leave TypeMeta empty, and
+	// kubectl hides managedFields by default
+	pod.APIVersion = "v1"
+	pod.Kind = "Pod"
+	pod.ManagedFields = nil
+
+	return yaml.Marshal(pod)
+}
+
 // ============================================================================
 // Resource Operations (Secrets, ConfigMaps)
 // ============================================================================
