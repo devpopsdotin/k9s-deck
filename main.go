@@ -622,6 +622,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					// Special handling for :add and :remove which need to return a Msg, not a Cmd
 					parts := strings.Fields(val)
+					if len(parts) == 0 {
+						// Empty command - nothing to do
+						return m, nil
+					}
 					if len(parts) >= 2 && parts[0] == "add" {
 						return m, func() tea.Msg { return addTargetMsg{name: parts[1]} }
 					}
