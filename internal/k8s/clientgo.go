@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
 	"sigs.k8s.io/yaml"
 )
 
@@ -28,12 +26,9 @@ type ClientGoClient struct {
 
 // NewClientGoClient creates a new client-go based client
 func NewClientGoClient(kubeContext string) (*ClientGoClient, error) {
-	kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
-
-	// Load config with specific context
-	configLoadingRules := &clientcmd.ClientConfigLoadingRules{
-		ExplicitPath: kubeconfig,
-	}
+	// Standard kubectl loading rules: honors $KUBECONFIG (including multiple
+	// colon-separated files) and falls back to ~/.kube/config
+	configLoadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	configOverrides := &clientcmd.ConfigOverrides{}
 	if kubeContext != "" {
 		configOverrides.CurrentContext = kubeContext
