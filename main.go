@@ -1464,8 +1464,11 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 
 		// Assemble items in consistent order (sorted by target name)
 		var globalItems []item
-		sort.Strings(targets) // Ensure consistent target order
-		for _, tName := range targets {
+		// Sort a copy: targets shares its backing array with the model, which
+		// the UI goroutine reads and appends to concurrently
+		sortedTargets := append([]string(nil), targets...)
+		sort.Strings(sortedTargets) // Ensure consistent target order
+		for _, tName := range sortedTargets {
 			if items, exists := targetItems[tName]; exists {
 				globalItems = append(globalItems, items...)
 			}
