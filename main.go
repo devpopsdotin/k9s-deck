@@ -184,6 +184,7 @@ type model struct {
 
 	// Log formatting
 	logFormatMode      bool                 // true=formatted, false=raw
+	logSource          string               // unprocessed logs currently shown ("" if not a log view)
 	multiContainerInfo *multiContainerCache // cache for multi-container detection
 
 	// Status messages
@@ -496,6 +497,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case detailsMsg:
+		m.logSource = ""
 		if msg.err != nil {
 			m.rawContent = fmt.Sprintf("Error: %v", msg.err)
 		} else {
@@ -512,6 +514,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					(currentItem.Type == "POD" && m.activeTab == 1)
 
 				if isLogContent {
+					m.logSource = msg.content
 					m.rawContent = processLogContent(msg.content, currentItem.Type,
 						currentItem.Name, m.logFormatMode)
 				} else {
@@ -764,6 +767,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Toggle log format mode
 			m.partialKey = ""
 			m.logFormatMode = !m.logFormatMode
+			// Re-render the current logs now rather than at the next refresh
+			if m.logSource != "" && len(m.items) > 0 {
+				curr := m.items[m.cursor]
+				m.rawContent = processLogContent(m.logSource, curr.Type, curr.Name, m.logFormatMode)
+			}
 			m.updateViewportContent()
 			return m, nil
 
