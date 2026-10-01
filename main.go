@@ -1291,10 +1291,11 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 			}
 			return commandFinishedMsg{}
 		case "fetch":
+			// No tickCmd here: the existing tick loop keeps running, and starting
+			// another would permanently add a second refresh loop
 			return tea.Batch(
 				func() tea.Msg { return detailsMsg{content: "Manual Refresh...", isYaml: false} },
 				func() tea.Msg { return commandFinishedMsg{} },
-				tickCmd(),
 			)()
 		default:
 			return detailsMsg{err: fmt.Errorf("Unknown command: %s", verb)}
