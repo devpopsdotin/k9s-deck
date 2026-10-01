@@ -375,13 +375,29 @@ func (c *ClientGoClient) GetEvents(ctx context.Context, namespace string) ([]byt
 		return nil, err
 	}
 
-	// Sort by lastTimestamp (kubectl --sort-by=.lastTimestamp equivalent)
-	sort.Slice(events.Items, func(i, j int) bool {
-		return events.Items[i].LastTimestamp.Before(&events.Items[j].LastTimestamp)
+	// Sort oldest first by when each event last happened. Newer reporters only
+	// set eventTime, so sorting on lastTimestamp alone put them first.
+	sort.SliceStable(events.Items, func(i, j int) bool {
+		return eventTimestamp(&events.Items[i]).Before(eventTimestamp(&events.Items[j]))
 	})
 
 	// Marshal to JSON
 	return json.Marshal(events)
+}
+
+// eventTimestamp returns the best available time for an event: lastTimestamp,
+// then eventTime, then firstTimestamp, then the object's creation time
+func eventTimestamp(e *corev1.Event) time.Time {
+	switch {
+	case !e.LastTimestamp.IsZero():
+		return e.LastTimestamp.Time
+	case !e.EventTime.IsZero():
+		return e.EventTime.Time
+	case !e.FirstTimestamp.IsZero():
+		return e.FirstTimestamp.Time
+	default:
+		return e.CreationTimestamp.Time
+	}
 }
 
 // ============================================================================
