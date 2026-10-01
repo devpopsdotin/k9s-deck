@@ -1150,12 +1150,12 @@ func (m model) View() string {
 
 		// Show suggestions for add/remove mode
 		if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions {
-			suggestions := m.getFilteredSuggestions()
+			suggestions, offset := m.getFilteredSuggestions()
 			if len(suggestions) > 0 {
 				var suggestionLines []string
 				for i, suggestion := range suggestions {
 					prefix := "  "
-					if i == m.suggestionIndex {
+					if offset+i == m.suggestionIndex {
 						prefix = "▶ " // highlight selected suggestion
 						suggestion = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true).Render(suggestion)
 					} else {
@@ -1803,16 +1803,22 @@ func (m *model) updateSuggestions() {
 	m.suggestionIndex = 0
 }
 
-// getFilteredSuggestions returns suggestions for display (limited to MaxSuggestions)
-func (m *model) getFilteredSuggestions() []string {
+// getFilteredSuggestions returns the window of suggestions to display (at
+// most MaxSuggestions) and the index of its first entry in m.suggestions.
+// The window scrolls so the selected suggestion is always visible.
+func (m *model) getFilteredSuggestions() ([]string, int) {
 	if !m.showSuggestions || len(m.suggestions) == 0 {
-		return []string{}
+		return []string{}, 0
 	}
 
 	if len(m.suggestions) <= MaxSuggestions {
-		return m.suggestions
+		return m.suggestions, 0
 	}
-	return m.suggestions[:MaxSuggestions]
+	start := 0
+	if m.suggestionIndex >= MaxSuggestions {
+		start = m.suggestionIndex - MaxSuggestions + 1
+	}
+	return m.suggestions[start : start+MaxSuggestions], start
 }
 
 // --- LOG PROCESSING FUNCTIONS ---
