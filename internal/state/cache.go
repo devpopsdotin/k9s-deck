@@ -43,3 +43,15 @@ func (c *MultiContainerCache) Size() int {
 	defer c.mu.RUnlock()
 	return len(c.cache)
 }
+
+// Retain drops cached entries for pods not in live, so the cache doesn't grow
+// forever as pods are replaced (thread-safe)
+func (c *MultiContainerCache) Retain(live map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for podName := range c.cache {
+		if !live[podName] {
+			delete(c.cache, podName)
+		}
+	}
+}

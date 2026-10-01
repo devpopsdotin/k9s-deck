@@ -24,6 +24,7 @@ import (
 	"github.com/devpopsdotin/k9s-deck/internal/k8s"
 	"github.com/devpopsdotin/k9s-deck/internal/logger"
 	"github.com/devpopsdotin/k9s-deck/internal/parser"
+	"github.com/devpopsdotin/k9s-deck/internal/state"
 )
 
 // --- CONFIG ---
@@ -98,17 +99,11 @@ type item struct {
 	Status string
 }
 
-type multiContainerCache struct {
-	mu    sync.RWMutex
-	cache map[string]bool // podName -> hasMultipleContainers
-}
-
 type model struct {
 	items []item
 
-	targets      []string          // List of deployments to monitor
-	selectors    map[string]string // Cache label selectors per deployment
-	helmReleases map[string]string // Cache helm release names
+	targets  []string       // List of deployments to monitor
+	stateMgr *state.Manager // label selectors and helm releases per deployment (thread-safe)
 
 	cursor     int
 	listOffset int
@@ -143,9 +138,9 @@ type model struct {
 	appliedSeq int
 
 	// Log formatting
-	logFormatMode      bool                 // true=formatted, false=raw
-	logSource          string               // unprocessed logs currently shown ("" if not a log view)
-	multiContainerInfo *multiContainerCache // cache for multi-container detection
+	logFormatMode      bool                       // true=formatted, false=raw
+	logSource          string                     // unprocessed logs currently shown ("" if not a log view)
+	multiContainerInfo *state.MultiContainerCache // cache for multi-container detection
 
 	// Status messages
 	statusMsg string // temporary status message (e.g., "Copied to clipboard")
@@ -228,17 +223,14 @@ func initialModel() model {
 
 	// Initialize targets with the starting deployment
 	return model{
-		textInput:     ti,
-		inputMode:     false,
-		listHeight:    DefaultListHeight,
-		targets:       []string{Deployment},
-		selectors:     make(map[string]string),
-		helmReleases:  make(map[string]string),
-		logFormatMode: true, // Default to formatted
-		multiContainerInfo: &multiContainerCache{
-			cache: make(map[string]bool),
-		},
-		fetchSeq: 1, // Init issues fetch #1
+		textInput:          ti,
+		inputMode:          false,
+		listHeight:         DefaultListHeight,
+		targets:            []string{Deployment},
+		stateMgr:           state.NewManager(),
+		logFormatMode:      true, // Default to formatted
+		multiContainerInfo: state.NewMultiContainerCache(),
+		fetchSeq:           1, // Init issues fetch #1
 	}
 }
 
@@ -250,15 +242,6 @@ func (m model) Init() tea.Cmd {
 func (m *model) startFetch() tea.Cmd {
 	m.fetchSeq++
 	return fetchDataCmd(m.targets, m.fetchSeq)
-}
-
-// copySelectorMap creates a copy of selectors map to avoid concurrent access issues
-func copySelectorMap(selectors map[string]string) map[string]string {
-	copied := make(map[string]string, len(selectors))
-	for k, v := range selectors {
-		copied[k] = v
-	}
-	return copied
 }
 
 // ensureCursorInBounds ensures cursor is within valid range of items
@@ -348,8 +331,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.targets = newTargets
 		// Also clean up the selectors and helm releases for removed target
-		delete(m.selectors, msg.name)
-		delete(m.helmReleases, msg.name)
+		m.stateMgr.DeleteDeployment(msg.name)
 		// Reset cursor if needed
 		if len(m.targets) == 0 {
 			m.cursor = 0
@@ -435,14 +417,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.items = msg.items
-		m.multiContainerInfo.prune(m.items)
+		m.multiContainerInfo.Retain(livePods(m.items))
 		// Merge maps
-		for k, v := range msg.selectors {
-			m.selectors[k] = v
-		}
-		for k, v := range msg.helmReleases {
-			m.helmReleases[k] = v
-		}
+		m.stateMgr.MergeSelectors(msg.selectors)
+		m.stateMgr.MergeHelmReleases(msg.helmReleases)
 
 		// Try to restore cursor to the same item
 		if currentSelection != nil && len(m.items) > 0 {
@@ -466,9 +444,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.clampListOffset()
 
-		// Always refresh details - pass a copy of selectors to avoid race
+		// Always refresh details
 		if len(m.items) > 0 {
-			cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+			cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.stateMgr, m.multiContainerInfo))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -592,7 +570,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.updateViewportContent()
 							return m, nil
 						}
-						helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.helmReleases)
+						helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.stateMgr)
 						if helmRelease == "" {
 							m.rawContent = "No Helm release found for current deployment"
 							m.updateViewportContent()
@@ -680,7 +658,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					// Find the helm release for current deployment context
 					deploymentName := getCurrentDeploymentName(m.items, m.cursor)
-					helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.helmReleases)
+					helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.stateMgr)
 					cmds = append(cmds, executeCommand(val, helmRelease, deploymentName))
 				}
 				return m, tea.Batch(cmds...)
@@ -764,7 +742,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.partialKey = ""
 				deploymentName := getCurrentDeploymentName(m.items, m.cursor)
 				if deploymentName != "" {
-					helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.helmReleases)
+					helmRelease := getCurrentHelmRelease(m.items, m.cursor, m.stateMgr)
 					cmds = append(cmds, executeCommand("restart", helmRelease, deploymentName))
 				}
 			} else {
@@ -882,7 +860,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Refresh details
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.stateMgr, m.multiContainerInfo))
 			}
 
 		case "up", "k":
@@ -892,7 +870,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.listOffset = m.cursor
 				}
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.stateMgr, m.multiContainerInfo))
 			}
 		case "down", "j":
 			if m.cursor < len(m.items)-1 {
@@ -901,7 +879,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.listOffset++
 				}
 				m.activeTab = 0
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.stateMgr, m.multiContainerInfo))
 			}
 
 		case "tab":
@@ -910,20 +888,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if curr.Type == "DEP" {
 					// Cycle 0 (YAML) -> 1 (Events) -> 2 (Logs) -> 0
 					m.activeTab = (m.activeTab + 1) % DeploymentTabCount
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, m.stateMgr, m.multiContainerInfo))
 				} else if curr.Type == "POD" {
 					m.activeTab = (m.activeTab + 1) % PodTabCount
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, m.stateMgr, m.multiContainerInfo))
 				} else {
 					// Reset tab for other resource types
 					m.activeTab = 0
-					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+					cmds = append(cmds, fetchDetailsCmd(curr, m.activeTab, m.stateMgr, m.multiContainerInfo))
 				}
 			}
 
 		case "enter":
 			if len(m.items) > 0 {
-				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
+				cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, m.stateMgr, m.multiContainerInfo))
 			}
 
 		// Viewport scrolling keybindings
@@ -1506,7 +1484,7 @@ func fetchDataCmd(targets []string, seq int) tea.Cmd {
 	}
 }
 
-func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContainerInfo *multiContainerCache) tea.Cmd {
+func fetchDetailsCmd(i item, tab int, stateMgr *state.Manager, multiContainerInfo *state.MultiContainerCache) tea.Cmd {
 	return func() tea.Msg {
 		var out []byte
 		var err error
@@ -1545,7 +1523,7 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				return detailsMsg{content: strings.Join(events, "\n"), isYaml: false}
 			} else if tab == 2 { // Aggregated Logs
 				// Use cached selector data instead of kubectl call
-				selector, exists := selectors[i.Name]
+				selector, exists := stateMgr.GetSelector(i.Name)
 				if !exists || selector == "" {
 					return detailsMsg{err: fmt.Errorf("No label selector found for deployment %s", i.Name)}
 				}
@@ -1701,12 +1679,13 @@ func getCurrentDeploymentName(items []item, cursor int) string {
 	return ""
 }
 
-func getCurrentHelmRelease(items []item, cursor int, helmReleases map[string]string) string {
+func getCurrentHelmRelease(items []item, cursor int, stateMgr *state.Manager) string {
 	deploymentName := getCurrentDeploymentName(items, cursor)
 	if deploymentName == "" {
 		return ""
 	}
-	return helmReleases[deploymentName]
+	release, _ := stateMgr.GetHelmRelease(deploymentName)
+	return release
 }
 
 // --- VALIDATION HELPERS ---
@@ -1802,33 +1781,23 @@ func (m *model) getFilteredSuggestions() ([]string, int) {
 	return m.suggestions[start : start+MaxSuggestions], start
 }
 
-// prune drops cached entries for pods that are no longer listed, so the
-// cache doesn't grow forever as pods are replaced
-func (c *multiContainerCache) prune(items []item) {
+// livePods returns the set of pod names in items
+func livePods(items []item) map[string]bool {
 	live := make(map[string]bool)
 	for _, it := range items {
 		if it.Type == "POD" {
 			live[it.Name] = true
 		}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for podName := range c.cache {
-		if !live[podName] {
-			delete(c.cache, podName)
-		}
-	}
+	return live
 }
 
 // detectMultiContainer checks if a pod has multiple containers (with caching)
-func detectMultiContainer(podName string, cache *multiContainerCache) (bool, error) {
+func detectMultiContainer(podName string, cache *state.MultiContainerCache) (bool, error) {
 	// Check cache first
-	cache.mu.RLock()
-	if result, exists := cache.cache[podName]; exists {
-		cache.mu.RUnlock()
+	if result, exists := cache.Get(podName); exists {
 		return result, nil
 	}
-	cache.mu.RUnlock()
 
 	// Query via client
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
@@ -1842,9 +1811,7 @@ func detectMultiContainer(podName string, cache *multiContainerCache) (bool, err
 	isMulti := len(containerNames) > 1
 
 	// Cache result
-	cache.mu.Lock()
-	cache.cache[podName] = isMulti
-	cache.mu.Unlock()
+	cache.Set(podName, isMulti)
 
 	return isMulti, nil
 }
