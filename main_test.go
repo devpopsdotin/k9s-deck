@@ -43,3 +43,19 @@ func TestGetFilteredSuggestionsKeepsSelectionVisible(t *testing.T) {
 		}
 	}
 }
+
+func TestClampListOffset(t *testing.T) {
+	// List shrank from 30 to 8 items while scrolled down
+	m := model{items: make([]item, 8), cursor: 7, listOffset: 20, listHeight: 5}
+	m.clampListOffset()
+	if m.listOffset != 3 {
+		t.Errorf("listOffset = %d, want 3", m.listOffset)
+	}
+
+	// Everything fits on screen
+	m = model{items: make([]item, 4), cursor: 2, listOffset: 2, listHeight: 10}
+	m.clampListOffset()
+	if m.listOffset != 0 {
+		t.Errorf("listOffset = %d, want 0", m.listOffset)
+	}
+}

@@ -315,6 +315,19 @@ func ensureCursorInBounds(cursor, itemCount int) int {
 	return cursor
 }
 
+// clampListOffset keeps the list scroll offset valid after the item count or
+// list height changes: the cursor stays visible and no blank rows are left
+// below the last item.
+func (m *model) clampListOffset() {
+	if m.cursor < m.listOffset {
+		m.listOffset = m.cursor
+	} else if m.cursor >= m.listOffset+m.listHeight {
+		m.listOffset = m.cursor - m.listHeight + 1
+	}
+	m.listOffset = minInt(m.listOffset, maxInt(len(m.items)-m.listHeight, 0))
+	m.listOffset = maxInt(m.listOffset, 0)
+}
+
 // maxInt returns the larger of two integers
 func maxInt(a, b int) int {
 	if a > b {
@@ -427,6 +440,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = maxInt(msg.Height, 0)
 
 		m.listHeight = maxInt(msg.Height-HeaderHeight-FooterHeight-UILayoutPadding, 1)
+		m.clampListOffset()
 
 		paneWidth := maxInt(int(float64(msg.Width)*LeftPaneWidthRatio), 0)
 		vpWidth := maxInt(msg.Width-paneWidth-4, 0)
@@ -489,6 +503,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Validate cursor position for new or empty selections
 			m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
 		}
+
+		m.clampListOffset()
 
 		// Always refresh details - pass a copy of selectors to avoid race
 		if len(m.items) > 0 {
