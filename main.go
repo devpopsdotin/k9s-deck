@@ -1527,8 +1527,9 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 				var events []string
 				events = append(events, fmt.Sprintf("%-25s %-10s %-15s %s", "TIMESTAMP", "TYPE", "REASON", "MESSAGE"))
 				gjson.Get(string(out), "items").ForEach(func(_, e gjson.Result) bool {
+					kind := e.Get("involvedObject.kind").String()
 					objName := e.Get("involvedObject.name").String()
-					if strings.Contains(objName, i.Name) {
+					if isDeploymentEvent(kind, objName, i.Name) {
 						ts := e.Get("lastTimestamp").String()
 						if ts == "" {
 							ts = e.Get("eventTime").String()
@@ -1617,6 +1618,33 @@ func highlight(content, format string) string {
 		return content
 	}
 	return buf.String()
+}
+
+// Generated name suffixes: ReplicaSets are "<deployment>-<pod-template-hash>",
+// Pods are "<deployment>-<pod-template-hash>-<random>"
+var (
+	replicaSetSuffixRegex = regexp.MustCompile(`^[a-z0-9]{6,10}$`)
+	podSuffixRegex        = regexp.MustCompile(`^[a-z0-9]{6,10}-[a-z0-9]{5}$`)
+)
+
+// isDeploymentEvent reports whether an event's involved object is the
+// deployment itself or one of its ReplicaSets/Pods. A plain substring match
+// would also pick up events of other deployments sharing a name prefix.
+func isDeploymentEvent(kind, objName, deployment string) bool {
+	switch kind {
+	case "Deployment":
+		return objName == deployment
+	case "ReplicaSet", "Pod":
+		suffix, ok := strings.CutPrefix(objName, deployment+"-")
+		if !ok {
+			return false
+		}
+		if kind == "ReplicaSet" {
+			return replicaSetSuffixRegex.MatchString(suffix)
+		}
+		return podSuffixRegex.MatchString(suffix)
+	}
+	return false
 }
 
 func getCurrentDeploymentName(items []item, cursor int) string {
