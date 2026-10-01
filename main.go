@@ -587,8 +587,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, nil
 						}
 						// Simple validation - check if it's a number
-						if strings.TrimSpace(val) == "" || !isPositiveInteger(val) {
-							m.rawContent = "Scale value must be a positive integer"
+						if !isNonNegativeInteger(val) {
+							m.rawContent = "Scale value must be a non-negative integer"
 							m.updateViewportContent()
 							return m, nil
 						}
@@ -1283,7 +1283,7 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 				return detailsMsg{err: fmt.Errorf("No deployment selected")}
 			}
 			replicas := 0
-			if _, err := fmt.Sscanf(parts[1], "%d", &replicas); err != nil {
+			if _, err := fmt.Sscanf(parts[1], "%d", &replicas); err != nil || replicas < 0 {
 				return detailsMsg{err: fmt.Errorf("Invalid replica count: %s", parts[1])}
 			}
 			err := client.ScaleDeployment(ctx, Namespace, deploymentName, replicas)
@@ -1648,7 +1648,12 @@ func getCurrentHelmRelease(items []item, cursor int, helmReleases map[string]str
 
 func isPositiveInteger(s string) bool {
 	s = strings.TrimSpace(s)
-	if s == "" || s == "0" {
+	return isNonNegativeInteger(s) && strings.Trim(s, "0") != ""
+}
+
+func isNonNegativeInteger(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
 		return false
 	}
 	for _, r := range s {
