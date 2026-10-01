@@ -460,6 +460,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.items = msg.items
+		m.multiContainerInfo.prune(m.items)
 		// Merge maps
 		for k, v := range msg.selectors {
 			m.selectors[k] = v
@@ -1944,6 +1945,24 @@ func prettyPrintJSONLog(line string) string {
 
 	// Apply Chroma syntax highlighting
 	return highlight(string(pretty), "json")
+}
+
+// prune drops cached entries for pods that are no longer listed, so the
+// cache doesn't grow forever as pods are replaced
+func (c *multiContainerCache) prune(items []item) {
+	live := make(map[string]bool)
+	for _, it := range items {
+		if it.Type == "POD" {
+			live[it.Name] = true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for podName := range c.cache {
+		if !live[podName] {
+			delete(c.cache, podName)
+		}
+	}
 }
 
 // detectMultiContainer checks if a pod has multiple containers (with caching)
