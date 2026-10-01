@@ -22,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tidwall/gjson"
+	"sigs.k8s.io/yaml"
 
 	"github.com/devpopsdotin/k9s-deck/internal/k8s"
 	"github.com/devpopsdotin/k9s-deck/internal/logger"
@@ -1633,10 +1634,9 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 			// For deployment YAML view (tab == 0)
 			out, err = client.GetDeployment(ctx, Namespace, i.Name)
 			if err == nil {
-				// Pretty-print the JSON for readability
-				var prettyJSON bytes.Buffer
-				if jsonErr := json.Indent(&prettyJSON, out, "", "  "); jsonErr == nil {
-					out = prettyJSON.Bytes()
+				// The client returns JSON; show it as YAML like the other views
+				if yamlOut, yamlErr := yaml.JSONToYAML(out); yamlErr == nil {
+					out = yamlOut
 				}
 			}
 			isYaml = true

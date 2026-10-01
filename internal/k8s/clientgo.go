@@ -71,6 +71,12 @@ func (c *ClientGoClient) GetDeployment(ctx context.Context, namespace, name stri
 		return nil, HandleK8sError(err, "deployment", name)
 	}
 
+	// Match kubectl output: typed clients leave TypeMeta empty, and kubectl
+	// hides managedFields by default
+	deployment.APIVersion = "apps/v1"
+	deployment.Kind = "Deployment"
+	deployment.ManagedFields = nil
+
 	// Marshal to JSON to match interface contract
 	data, err := json.Marshal(deployment)
 	if err != nil {
@@ -340,7 +346,11 @@ func (c *ClientGoClient) GetConfigMap(ctx context.Context, namespace, name strin
 		return nil, err
 	}
 
-	// Marshal to YAML (matches kubectl get configmap -o yaml)
+	// Match kubectl get configmap -o yaml (see GetDeployment)
+	configMap.APIVersion = "v1"
+	configMap.Kind = "ConfigMap"
+	configMap.ManagedFields = nil
+
 	return yaml.Marshal(configMap)
 }
 
