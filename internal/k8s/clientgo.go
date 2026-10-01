@@ -204,8 +204,13 @@ func (c *ClientGoClient) GetPodLogs(ctx context.Context, namespace, podName stri
 			return nil, err
 		}
 
+		// Init containers first, matching kubectl logs --all-containers
+		containers := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+
 		// Fetch logs for each container
-		for _, container := range pod.Spec.Containers {
+		var lastErr error
+		succeeded := 0
+		for _, container := range containers {
 			tailLinesPtr := int64(tailLines)
 			podLogOpts := &corev1.PodLogOptions{
 				Container: container.Name,
@@ -214,15 +219,20 @@ func (c *ClientGoClient) GetPodLogs(ctx context.Context, namespace, podName stri
 
 			stream, err := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, podLogOpts).Stream(ctx)
 			if err != nil {
-				continue // Skip failed containers
+				// Skip containers without logs (e.g. not started yet)
+				slog.Debug("failed to stream container logs", "pod", podName, "container", container.Name, "error", err)
+				lastErr = err
+				continue
 			}
 
 			// Read all logs from stream
 			containerLogs, err := io.ReadAll(stream)
 			stream.Close()
 			if err != nil {
+				lastErr = err
 				continue
 			}
+			succeeded++
 
 			// Add prefix if requested
 			if prefix {
@@ -236,6 +246,11 @@ func (c *ClientGoClient) GetPodLogs(ctx context.Context, namespace, podName stri
 			} else {
 				logs = append(logs, containerLogs...)
 			}
+		}
+
+		// Surface the error instead of an empty view when no container worked
+		if succeeded == 0 && lastErr != nil {
+			return nil, lastErr
 		}
 	} else {
 		// Single container (or default)
