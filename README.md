@@ -290,7 +290,7 @@ go test -race ./...              # Run with race detector
 
 ### Logging
 
-Application logs are written to `/tmp/k9s-deck.log` in structured JSON format with all Kubernetes operations:
+Application logs are written to `/tmp/k9s-deck.log` (`%TEMP%\k9s-deck.log` on Windows) in structured JSON format with all Kubernetes operations:
 
 ```bash
 tail -f /tmp/k9s-deck.log        # Monitor logs in real-time

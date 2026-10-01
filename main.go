@@ -237,7 +237,7 @@ func main() {
 		Deployment = os.Args[3]
 	}
 
-	// Initialize logger (writes to /tmp/k9s-deck.log)
+	// Initialize logger (writes to logger.LogPath(), /tmp/k9s-deck.log on Unix)
 	if err := logger.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize logger: %v\n", err)
 		// Continue anyway - logging is not critical
@@ -1235,8 +1235,24 @@ func copyToClipboard(content string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		cmd = exec.Command("pbcopy")
-	case "linux":
-		cmd = exec.Command("xclip", "-selection", "clipboard")
+	case "linux", "freebsd", "openbsd", "netbsd":
+		// Prefer the Wayland tool on Wayland sessions, then the X11 tools
+		var candidates [][]string
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			candidates = append(candidates, []string{"wl-copy"})
+		}
+		candidates = append(candidates,
+			[]string{"xclip", "-selection", "clipboard"},
+			[]string{"xsel", "--clipboard", "--input"})
+		for _, c := range candidates {
+			if _, err := exec.LookPath(c[0]); err == nil {
+				cmd = exec.Command(c[0], c[1:]...)
+				break
+			}
+		}
+		if cmd == nil {
+			return fmt.Errorf("no clipboard tool found (install wl-copy, xclip or xsel)")
+		}
 	case "windows":
 		cmd = exec.Command("clip")
 	default:

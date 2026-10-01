@@ -3,12 +3,23 @@ package logger
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
 )
+
+// LogPath returns the log file location: /tmp/k9s-deck.log, or the user's
+// temp directory on Windows where /tmp doesn't exist
+func LogPath() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.TempDir(), "k9s-deck.log")
+	}
+	return "/tmp/k9s-deck.log"
+}
 
 // Init initializes the structured logger to write to a file
 // This avoids interfering with the TUI output
 func Init() error {
-	logFile, err := os.OpenFile("/tmp/k9s-deck.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
