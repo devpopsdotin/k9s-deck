@@ -5,6 +5,16 @@ All notable changes to K9s Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- The Bubble Tea app moved from `main.go` into `internal/ui`; `main.go` is now only the entry point
+- The UI uses `internal/parser` and `internal/state` instead of duplicated copies in `main.go`
+- The Kubernetes client, context and namespace are passed to the UI through `ui.Config` instead of package globals, so UI commands can be tested with `k8s.MockClient`
+
+### Removed
+- Unused `kubectl`-based `parser.DetectMultiContainer` and duplicate cache, plus the unused `ui.Model`, message and style definitions
+
 ## [2.1.0] - 2024-12-02
 
 ### Changed
