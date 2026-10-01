@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+// newTestClient creates a client from the default kubeconfig, skipping the
+// test or benchmark when no kubeconfig is available (e.g. in CI)
+func newTestClient(tb testing.TB) *ClientGoClient {
+	tb.Helper()
+	client, err := NewClientGoClient("")
+	if err != nil {
+		tb.Skipf("Skipping: no usable kubeconfig: %v", err)
+	}
+	return client
+}
+
 // TestClientGoClient_Integration tests ClientGoClient against a real cluster
 // Run with: go test -v ./internal/k8s -short=false
 func TestClientGoClient_Integration(t *testing.T) {
@@ -14,10 +25,7 @@ func TestClientGoClient_Integration(t *testing.T) {
 	}
 
 	// Create client using default kubeconfig context
-	client, err := NewClientGoClient("")
-	if err != nil {
-		t.Fatalf("Failed to create ClientGoClient: %v", err)
-	}
+	client := newTestClient(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -70,17 +78,13 @@ func TestClientGoClient_ContextHandling(t *testing.T) {
 
 	// Test with empty context (should use default)
 	t.Run("DefaultContext", func(t *testing.T) {
-		client, err := NewClientGoClient("")
-		if err != nil {
-			t.Errorf("Failed to create client with default context: %v", err)
-			return
-		}
+		client := newTestClient(t)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		// Simple operation to verify connection
-		_, err = client.ListDeployments(ctx, "default")
+		_, err := client.ListDeployments(ctx, "default")
 		if err != nil {
 			t.Logf("ListDeployments with default context: %v", err)
 		} else {
@@ -95,10 +99,7 @@ func TestClientGoClient_ErrorHandling(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	client, err := NewClientGoClient("")
-	if err != nil {
-		t.Fatalf("Failed to create ClientGoClient: %v", err)
-	}
+	client := newTestClient(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -144,10 +145,7 @@ func TestClientGoClient_OperationTypes(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	client, err := NewClientGoClient("")
-	if err != nil {
-		t.Fatalf("Failed to create ClientGoClient: %v", err)
-	}
+	client := newTestClient(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
