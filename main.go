@@ -177,6 +177,11 @@ type model struct {
 	lastUpd    time.Time
 	err        error
 
+	// Refresh sequencing: fetchSeq is the last fetch issued, appliedSeq the
+	// last result applied. They differ while a fetch is in flight.
+	fetchSeq   int
+	appliedSeq int
+
 	// Log formatting
 	logFormatMode      bool                 // true=formatted, false=raw
 	multiContainerInfo *multiContainerCache // cache for multi-container detection
@@ -188,6 +193,7 @@ type model struct {
 // --- MESSAGES ---
 type tickMsg time.Time
 type dataMsg struct {
+	seq          int
 	items        []item
 	selectors    map[string]string
 	helmReleases map[string]string
@@ -271,11 +277,18 @@ func initialModel() model {
 		multiContainerInfo: &multiContainerCache{
 			cache: make(map[string]bool),
 		},
+		fetchSeq: 1, // Init issues fetch #1
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchDataCmd(m.targets, m.selectors), tickCmd(), textinput.Blink)
+	return tea.Batch(fetchDataCmd(m.targets, m.fetchSeq), tickCmd(), textinput.Blink)
+}
+
+// startFetch issues a new data refresh tagged with the next sequence number
+func (m *model) startFetch() tea.Cmd {
+	m.fetchSeq++
+	return fetchDataCmd(m.targets, m.fetchSeq)
 }
 
 // copySelectorMap creates a copy of selectors map to avoid concurrent access issues
@@ -327,10 +340,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- SYSTEM MESSAGES ---
 	switch msg := msg.(type) {
 	case tickMsg:
-		return m, tea.Batch(fetchDataCmd(m.targets, m.selectors), tickCmd())
+		// Skip this tick's refresh if the previous one is still in flight,
+		// so slow API responses don't pile up requests
+		if m.appliedSeq < m.fetchSeq {
+			return m, tickCmd()
+		}
+		return m, tea.Batch(m.startFetch(), tickCmd())
 
 	case commandFinishedMsg:
-		return m, fetchDataCmd(m.targets, m.selectors)
+		return m, m.startFetch()
 
 	case addTargetMsg:
 		// Check duplicates
@@ -344,7 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !exists {
 			m.targets = append(m.targets, msg.name)
 		}
-		return m, fetchDataCmd(m.targets, m.selectors)
+		return m, m.startFetch()
 
 	case removeTargetMsg:
 		// Remove target from list
@@ -362,7 +380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.targets) == 0 {
 			m.cursor = 0
 		}
-		return m, fetchDataCmd(m.targets, m.selectors)
+		return m, m.startFetch()
 
 	case suggestionsMsg:
 		// Update available deployment suggestions (only for add mode)
@@ -425,6 +443,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dataMsg:
+		// Drop results that arrive after a newer fetch was already applied
+		if msg.seq <= m.appliedSeq {
+			return m, nil
+		}
+		m.appliedSeq = msg.seq
 		m.lastUpd = time.Now()
 		// Record any error, but still apply the items: a failing target is
 		// rendered as an "(Err)" header and must not freeze the other targets.
@@ -734,7 +757,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "ctrl+f":
-			cmds = append(cmds, fetchDataCmd(m.targets, m.selectors))
+			cmds = append(cmds, m.startFetch())
 
 		case "f":
 			// Toggle log format mode
@@ -1306,7 +1329,7 @@ func executeCommand(input, helmRelease, deploymentName string) tea.Cmd {
 	}
 }
 
-func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
+func fetchDataCmd(targets []string, seq int) tea.Cmd {
 	return func() tea.Msg {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -1478,7 +1501,7 @@ func fetchDataCmd(targets []string, selectors map[string]string) tea.Cmd {
 			}
 		}
 
-		return dataMsg{items: globalItems, selectors: updatedSelectors, helmReleases: updatedHelm, err: combinedErr}
+		return dataMsg{seq: seq, items: globalItems, selectors: updatedSelectors, helmReleases: updatedHelm, err: combinedErr}
 	}
 }
 
