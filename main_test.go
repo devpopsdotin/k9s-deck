@@ -23,3 +23,39 @@ func TestIsDeploymentEvent(t *testing.T) {
 		}
 	}
 }
+
+func TestGetFilteredSuggestionsKeepsSelectionVisible(t *testing.T) {
+	m := model{
+		showSuggestions: true,
+		suggestions:     []string{"a", "b", "c", "d", "e", "f", "g"},
+	}
+	for idx := range m.suggestions {
+		m.suggestionIndex = idx
+		visible, offset := m.getFilteredSuggestions()
+		if len(visible) != MaxSuggestions {
+			t.Fatalf("index %d: got %d visible, want %d", idx, len(visible), MaxSuggestions)
+		}
+		if idx < offset || idx >= offset+len(visible) {
+			t.Errorf("index %d not visible in window starting at %d", idx, offset)
+		}
+		if visible[idx-offset] != m.suggestions[idx] {
+			t.Errorf("index %d: highlighted %q, want %q", idx, visible[idx-offset], m.suggestions[idx])
+		}
+	}
+}
+
+func TestClampListOffset(t *testing.T) {
+	// List shrank from 30 to 8 items while scrolled down
+	m := model{items: make([]item, 8), cursor: 7, listOffset: 20, listHeight: 5}
+	m.clampListOffset()
+	if m.listOffset != 3 {
+		t.Errorf("listOffset = %d, want 3", m.listOffset)
+	}
+
+	// Everything fits on screen
+	m = model{items: make([]item, 4), cursor: 2, listOffset: 2, listHeight: 10}
+	m.clampListOffset()
+	if m.listOffset != 0 {
+		t.Errorf("listOffset = %d, want 0", m.listOffset)
+	}
+}

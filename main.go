@@ -22,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tidwall/gjson"
+	"sigs.k8s.io/yaml"
 
 	"github.com/devpopsdotin/k9s-deck/internal/k8s"
 	"github.com/devpopsdotin/k9s-deck/internal/logger"
@@ -184,6 +185,7 @@ type model struct {
 
 	// Log formatting
 	logFormatMode      bool                 // true=formatted, false=raw
+	logSource          string               // unprocessed logs currently shown ("" if not a log view)
 	multiContainerInfo *multiContainerCache // cache for multi-container detection
 
 	// Status messages
@@ -314,6 +316,19 @@ func ensureCursorInBounds(cursor, itemCount int) int {
 	return cursor
 }
 
+// clampListOffset keeps the list scroll offset valid after the item count or
+// list height changes: the cursor stays visible and no blank rows are left
+// below the last item.
+func (m *model) clampListOffset() {
+	if m.cursor < m.listOffset {
+		m.listOffset = m.cursor
+	} else if m.cursor >= m.listOffset+m.listHeight {
+		m.listOffset = m.cursor - m.listHeight + 1
+	}
+	m.listOffset = minInt(m.listOffset, maxInt(len(m.items)-m.listHeight, 0))
+	m.listOffset = maxInt(m.listOffset, 0)
+}
+
 // maxInt returns the larger of two integers
 func maxInt(a, b int) int {
 	if a > b {
@@ -426,6 +441,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = maxInt(msg.Height, 0)
 
 		m.listHeight = maxInt(msg.Height-HeaderHeight-FooterHeight-UILayoutPadding, 1)
+		m.clampListOffset()
 
 		paneWidth := maxInt(int(float64(msg.Width)*LeftPaneWidthRatio), 0)
 		vpWidth := maxInt(msg.Width-paneWidth-4, 0)
@@ -489,6 +505,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = ensureCursorInBounds(m.cursor, len(m.items))
 		}
 
+		m.clampListOffset()
+
 		// Always refresh details - pass a copy of selectors to avoid race
 		if len(m.items) > 0 {
 			cmds = append(cmds, fetchDetailsCmd(m.items[m.cursor], m.activeTab, copySelectorMap(m.selectors), m.multiContainerInfo))
@@ -496,6 +514,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case detailsMsg:
+		m.logSource = ""
 		if msg.err != nil {
 			m.rawContent = fmt.Sprintf("Error: %v", msg.err)
 		} else {
@@ -512,6 +531,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					(currentItem.Type == "POD" && m.activeTab == 1)
 
 				if isLogContent {
+					m.logSource = msg.content
 					m.rawContent = processLogContent(msg.content, currentItem.Type,
 						currentItem.Name, m.logFormatMode)
 				} else {
@@ -574,6 +594,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.filterMode = false
 					m.updateViewportContent()
 				} else if m.shortcutMode != "" {
+					// Enter accepts the highlighted suggestion when the list is shown
+					if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions &&
+						m.suggestionIndex < len(m.suggestions) {
+						val = m.suggestions[m.suggestionIndex]
+					}
+					m.showSuggestions = false
+
 					// Handle shortcut mode input
 					m.textInput.Reset()
 					shortcut := m.shortcutMode
@@ -764,6 +791,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Toggle log format mode
 			m.partialKey = ""
 			m.logFormatMode = !m.logFormatMode
+			// Re-render the current logs now rather than at the next refresh
+			if m.logSource != "" && len(m.items) > 0 {
+				curr := m.items[m.cursor]
+				m.rawContent = processLogContent(m.logSource, curr.Type, curr.Name, m.logFormatMode)
+			}
 			m.updateViewportContent()
 			return m, nil
 
@@ -1150,12 +1182,12 @@ func (m model) View() string {
 
 		// Show suggestions for add/remove mode
 		if (m.shortcutMode == "add" || m.shortcutMode == "remove") && m.showSuggestions {
-			suggestions := m.getFilteredSuggestions()
+			suggestions, offset := m.getFilteredSuggestions()
 			if len(suggestions) > 0 {
 				var suggestionLines []string
 				for i, suggestion := range suggestions {
 					prefix := "  "
-					if i == m.suggestionIndex {
+					if offset+i == m.suggestionIndex {
 						prefix = "▶ " // highlight selected suggestion
 						suggestion = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true).Render(suggestion)
 					} else {
@@ -1602,10 +1634,9 @@ func fetchDetailsCmd(i item, tab int, selectors map[string]string, multiContaine
 			// For deployment YAML view (tab == 0)
 			out, err = client.GetDeployment(ctx, Namespace, i.Name)
 			if err == nil {
-				// Pretty-print the JSON for readability
-				var prettyJSON bytes.Buffer
-				if jsonErr := json.Indent(&prettyJSON, out, "", "  "); jsonErr == nil {
-					out = prettyJSON.Bytes()
+				// The client returns JSON; show it as YAML like the other views
+				if yamlOut, yamlErr := yaml.JSONToYAML(out); yamlErr == nil {
+					out = yamlOut
 				}
 			}
 			isYaml = true
@@ -1803,16 +1834,22 @@ func (m *model) updateSuggestions() {
 	m.suggestionIndex = 0
 }
 
-// getFilteredSuggestions returns suggestions for display (limited to MaxSuggestions)
-func (m *model) getFilteredSuggestions() []string {
+// getFilteredSuggestions returns the window of suggestions to display (at
+// most MaxSuggestions) and the index of its first entry in m.suggestions.
+// The window scrolls so the selected suggestion is always visible.
+func (m *model) getFilteredSuggestions() ([]string, int) {
 	if !m.showSuggestions || len(m.suggestions) == 0 {
-		return []string{}
+		return []string{}, 0
 	}
 
 	if len(m.suggestions) <= MaxSuggestions {
-		return m.suggestions
+		return m.suggestions, 0
 	}
-	return m.suggestions[:MaxSuggestions]
+	start := 0
+	if m.suggestionIndex >= MaxSuggestions {
+		start = m.suggestionIndex - MaxSuggestions + 1
+	}
+	return m.suggestions[start : start+MaxSuggestions], start
 }
 
 // --- LOG PROCESSING FUNCTIONS ---
