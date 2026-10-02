@@ -267,3 +267,22 @@ func TestMultiContainerCache_ConcurrentAccess(t *testing.T) {
 		t.Error("Expected to find cached value after concurrent access")
 	}
 }
+
+func TestMultiContainerCache_Retain(t *testing.T) {
+	cache := NewMultiContainerCache()
+	cache.Set("pod1", true)
+	cache.Set("pod2", false)
+	cache.Set("pod3", true)
+
+	cache.Retain(map[string]bool{"pod1": true, "pod3": true})
+
+	if cache.Size() != 2 {
+		t.Errorf("Expected size 2 after retain, got %d", cache.Size())
+	}
+	if _, exists := cache.Get("pod2"); exists {
+		t.Error("Expected pod2 to be evicted")
+	}
+	if v, exists := cache.Get("pod1"); !exists || !v {
+		t.Error("Expected pod1 to be kept with its value")
+	}
+}

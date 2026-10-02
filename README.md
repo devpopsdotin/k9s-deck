@@ -70,18 +70,15 @@ plugins:
 ### Option B: Build from Source
 If you prefer to compile it yourself:
 
-1.  **Clone & Init:**
+1.  **Clone:**
     ```bash
-    mkdir k9s-deck
+    git clone https://github.com/devpopsdotin/k9s-deck.git
     cd k9s-deck
-    # Copy main.go here
-    go mod init k9s-deck
-    go mod tidy
     ```
 
 2.  **Build:**
     ```bash
-    go build -o k9s-deck main.go
+    go build -o k9s-deck .
     ```
 
 ---
@@ -249,14 +246,13 @@ K9s Deck uses a modular architecture with clear separation of concerns:
 
 ```
 k9s-deck/
-├── main.go                        # Entry point & Bubble Tea UI
-├── internal/
-│   ├── logger/                    # Structured logging (slog)
-│   ├── parser/                    # Log parsing & syntax highlighting
-│   ├── k8s/                       # Kubernetes operations (kubectl/helm)
-│   ├── state/                     # Thread-safe state management
-│   └── ui/                        # UI components & styles
-└── testdata/                      # Test fixtures
+├── main.go                        # Entry point: args, logger, client setup
+└── internal/
+    ├── ui/                        # Bubble Tea app: model, update, view, commands
+    ├── k8s/                       # Kubernetes client (client-go; Helm via CLI)
+    ├── parser/                    # Log parsing, formatting & syntax highlighting
+    ├── state/                     # Thread-safe deployment state & caches
+    └── logger/                    # Structured logging (slog)
 ```
 
 ### Building from Source
@@ -278,13 +274,12 @@ go test -race ./...
 
 ### Testing
 
-Comprehensive test suite with 32 unit tests:
-
 ```bash
 go test ./...                    # Run all tests
-go test -v ./internal/parser     # Parser tests (7 tests)
-go test -v ./internal/k8s        # K8s tests (14 tests)
-go test -v ./internal/state      # State tests (11 tests, race-free)
+go test -v ./internal/ui         # UI tests (uses k8s.MockClient, no cluster needed)
+go test -v ./internal/parser     # Parser tests
+go test -v ./internal/k8s        # K8s tests (integration tests skip without a kubeconfig)
+go test -v ./internal/state      # State tests
 go test -race ./...              # Run with race detector
 ```
 
