@@ -1,16 +1,18 @@
 
-# K9s Deck (v2.1.0)
+# K9s Deck (v2.2.0)
 
 **K9s Deck** is a high-performance, cross-platform plugin for [K9s](https://k9scli.io/) written in **Go**. It transforms the standard Deployment view into a powerful dashboard, allowing engineers to visualize the relationship between Deployments, Pods, Helm Releases, Secrets, and ConfigMaps in real-time.
 
-**v2.1.0** delivers **5-10x performance improvement** with fully integrated native Kubernetes client-go library. Direct API access via HTTP/2 connection pooling eliminates kubectl subprocess overhead while maintaining 100% backwards compatibility. All operations now use client-go with comprehensive structured logging.
+**v2.2.0** is a reliability release: it fixes a crash on an empty command, a refresh freeze when one deployment fails to load, and a data race; honors `KUBECONFIG`; drops the last `kubectl` dependencies (logs and pod YAML now use client-go); and adds CI. See the [CHANGELOG](CHANGELOG.md) for the full list.
+
+**v2.1.0** delivered a **5-10x performance improvement** with fully integrated native Kubernetes client-go library. Direct API access via HTTP/2 connection pooling eliminates kubectl subprocess overhead while maintaining 100% backwards compatibility. All operations now use client-go with comprehensive structured logging.
 
 **v2.0.0** featured a complete architectural refactoring with modular packages, comprehensive testing (32 unit tests), and thread-safe concurrent operations.
 
 Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI framework and native [client-go](https://github.com/kubernetes/client-go) Kubernetes API.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Go](https://img.shields.io/badge/go-1.21%2B-00ADD8.svg)
+![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8.svg)
 
 ---
 
@@ -27,7 +29,7 @@ Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI fram
 *   **LSP-like Autocomplete:** Intelligent deployment suggestions with real-time filtering for add/remove operations.
 *   **Command Mode (`:`):** Vim-style command bar to Scale, Restart, Rollback, Add, and Remove deployments directly from the plugin.
 *   **Tabbed Interface:** Toggle between Configuration (YAML) and Live Data (Logs/Events) with a single key.
-*   **Robust & Fast:** Includes strict timeouts (2s) on API calls to prevent UI freezing and "Smart Truncation" to handle long resource names on smaller screens.
+*   **Robust & Fast:** Strict timeouts on API calls (2s for reads, 5s for actions) prevent UI freezing, a slow API server never piles up refresh requests, and one failing deployment never blocks the others. "Smart Truncation" handles long resource names on smaller screens.
 *   **Manual Control:** Force refresh data (`Ctrl+F`) when the API server is slow to propagate changes.
 *   **Quick Navigation:** Jump to specific resource types instantly using number keys (1-5). Supports cycling through multiple resources of the same type.
 
@@ -37,9 +39,14 @@ Built with the [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI fram
 
 ### 1. Download Binary
 1.  Go to the [Releases Page](https://github.com/devpopsdotin/k9s-deck/releases) on GitHub.
-2.  Download the binary for your OS (Windows, macOS, or Linux).
-3.  Rename the file to `k9s-deck` (or `k9s-deck.exe` on Windows).
-4.  Move it to a permanent location (e.g., `/usr/local/bin/` or `~/.k9s/plugins/`).
+2.  Download the archive for your OS and architecture (e.g. `k9s-deck_darwin_arm64.tar.gz`) and extract the `k9s-deck` binary (`k9s-deck.exe` on Windows).
+    *   On Linux you can instead install the `.deb`, `.rpm` or Arch (`.pkg.tar.zst`) package.
+3.  Move the binary to a permanent location (e.g., `/usr/local/bin/` or `~/.k9s/plugins/`).
+
+**Requirements:**
+*   A kubeconfig: `$KUBECONFIG` (including multiple colon-separated files) or `~/.kube/config`, the same as `kubectl`.
+*   The `helm` CLI, only for the Helm history and rollback features.
+*   For `y` (Yank): `pbcopy` (macOS), `clip` (Windows), or on Linux `wl-copy` (Wayland), `xclip` or `xsel`.
 
 ### 2. Configure K9s
 You need to register the plugin in your K9s configuration.
@@ -91,13 +98,11 @@ If you prefer to compile it yourself:
 | :--- | :--- | :--- |
 | **↑ / ↓** or **j / k** | Global | Select a resource (Pod, Secret, Helm, etc.). |
 | **1 - 5** | Global | **Quick Jump**: 1=Dep, 2=Helm, 3=CM, 4=Secret, 5=Pod.<br>*(Press repeatedly to cycle through items)* |
-| **Tab** | DEP / POD | **Toggle View**: Switch between YAML <-> Events (Deployment) or YAML <-> Logs (Pod). |
+| **Tab** | DEP / POD | **Toggle View**: Cycle YAML -> Events -> Logs (Deployment) or YAML <-> Logs (Pod). |
 | **f** | Logs | **Toggle Format**: Switch between formatted (colored, enhanced) and raw log view. |
 | **y** | Global | **Yank (Copy)**: Copy entire right pane content to clipboard (vim-style). |
 | **Enter** | Global | Refresh the details pane for the selected item. |
 | **Ctrl + F** | Global | **Force Refresh**: Manually trigger a data fetch if the UI seems stale. |
-| **Ctrl + L** | Pod | **Quick Logs**: View the last 200 lines of logs in the right pane. |
-| **Ctrl + S** | Pod | **Search Logs**: Opens full logs in `less` for searching (`/pattern`). |
 | **:** | Global | Enter **Command Mode**. |
 | **/** | Global | Enter **Filter Mode**. |
 | **q** | Global | Quit the plugin. |
@@ -118,7 +123,7 @@ If you prefer to compile it yourself:
 | Key | Context | Action |
 | :--- | :--- | :--- |
 | **rr** | Global | **Restart Deployment**: Double-tap 'r' to instantly restart the current deployment. |
-| **s** | Global | **Scale Deployment**: Opens prompt to enter replica count. |
+| **s** | Global | **Scale Deployment**: Opens prompt to enter replica count (0 or more). |
 | **R** | Global | **Rollback Deployment**: Opens prompt to enter revision number (requires Helm release). |
 | **+** | Global | **Add Deployment**: Opens LSP-like autocomplete with available cluster deployments (excludes monitored ones). |
 | **-** | Global | **Remove Deployment**: Opens LSP-like autocomplete with currently monitored deployments to remove. |
@@ -130,7 +135,7 @@ Press `:` to focus the command bar at the bottom. Type your command and press En
 | Command | Syntax | Description |
 | :--- | :--- | :--- |
 | **Scale** | `:scale <N>` | Scales the deployment to `N` replicas (e.g., `:scale 3`). |
-| **Restart** | `:restart` | Triggers a rolling restart (`kubectl rollout restart`). |
+| **Restart** | `:restart` | Triggers a rolling restart (same as `kubectl rollout restart`). |
 | **Rollback** | `:rollback <Rev>` | Rolls back the Helm release to a specific revision (e.g., `:rollback 5`). |
 | **Add** | `:add <name>` | Adds another deployment to monitor (e.g., `:add web-frontend`). |
 | **Remove** | `:remove <name>` | Removes a deployment from monitoring (e.g., `:remove web-frontend`). |
@@ -145,7 +150,7 @@ K9s Deck includes intelligent autocomplete functionality for deployment manageme
 ### Add Deployment (`+`)
 - **Smart Filtering**: Shows only deployments available in the cluster that aren't already being monitored
 - **Real-time Search**: Type to filter deployments by name (case-insensitive)
-- **Keyboard Navigation**: Use ↑↓ arrows to navigate through suggestions
+- **Keyboard Navigation**: Use ↑↓ arrows to navigate through suggestions; the list scrolls to keep the selection visible
 - **Tab Completion**: Press Tab to auto-complete with the selected deployment
 - **Visual Feedback**: Selected suggestion is highlighted with ▶ and colored text
 
@@ -160,7 +165,7 @@ K9s Deck includes intelligent autocomplete functionality for deployment manageme
 | **Type** | Filter suggestions by name |
 | **↑ / ↓** | Navigate through suggestions |
 | **Tab** | Complete with selected suggestion |
-| **Enter** | Add/Remove the selected or typed deployment |
+| **Enter** | Add/Remove the highlighted suggestion (or the typed name when no list is shown) |
 | **Esc** | Cancel and return to normal mode |
 
 ---
@@ -180,7 +185,7 @@ The detection is case-insensitive and works with various log formats (structured
 
 ### Smart Pod Prefixes
 When viewing deployment logs with multiple pods:
-- **Shortened Prefixes**: Pod names are intelligently shortened to `[..abc123/container]` format, keeping the unique 7-character suffix
+- **Shortened Prefixes**: Pod names are shortened to `[<replicaset-hash>-<pod-suffix>]` (e.g. `[55c74d7f8-zn5fd]`), since the deployment name is already known
 - **Colored Icons**: Each pod gets a consistent color with a `●` icon for easy visual distinction
 - **Hash-Based Colors**: Same pod always gets the same color across sessions using a 10-color palette
 
@@ -188,7 +193,7 @@ When viewing deployment logs with multiple pods:
 For pod logs:
 - **Automatic Detection**: System detects if a pod has multiple containers
 - **Smart Prefix**: Prefixes are only shown for multi-container pods
-- **Cached**: Container count is cached to avoid repeated kubectl calls
+- **Cached**: Container count is cached to avoid repeated API calls
 
 ### JSON Pretty-Printing
 JSON log lines are automatically detected and enhanced:
@@ -200,16 +205,16 @@ JSON log lines are automatically detected and enhanced:
 ### Format Toggle
 Press **`f`** to switch between:
 - **Formatted Mode** (default): All enhancements active - colors, smart prefixes, JSON formatting
-- **Raw Mode**: Original kubectl output unchanged, useful for copying or debugging
+- **Raw Mode**: Original log output unchanged, useful for copying or debugging
 
-The current mode is displayed in the footer: `(Formatted)` or `(Raw)`
+The switch takes effect immediately, and the current mode is displayed in the footer: `(Formatted)` or `(Raw)`
 
 ---
 
 ## 🧠 Architecture & Logic
 
 ### Smart Status Detection
-Standard `kubectl` JSON sometimes reports a Pod as "Waiting" (reason: `ContainerCreating`) even after it is `Running` and `Ready`. K9s Deck fixes this:
+The Kubernetes API sometimes reports a Pod as "Waiting" (reason: `ContainerCreating`) even after it is `Running` and `Ready`. K9s Deck fixes this:
 1.  It calculates `Ready / Total` containers.
 2.  If `Ready == Total`, it forces the status to **Running (1/1)**, ignoring historical waiting reasons.
 3.  It only reports errors (like `CrashLoopBackOff`) if the pod is **not** ready.
@@ -217,7 +222,7 @@ Standard `kubectl` JSON sometimes reports a Pod as "Waiting" (reason: `Container
 ### Resource Map
 The Deck automatically discovers and links:
 *   🚀 **Deployment:** The root object.
-*   ⚓ **Helm Release:** detected via `meta.helm.sh/release-name` annotation or label.
+*   ⚓ **Helm Release:** detected via the `meta.helm.sh/release-name` annotation.
 *   📦 **Pods:** Live pods controlled by the deployment.
 *   🔒 **Secrets:** Referenced in `envFrom`, `valueFrom`, or `volumes`.
 *   📜 **ConfigMaps:** Referenced in `envFrom`, `valueFrom`, or `volumes`.
@@ -231,16 +236,22 @@ If the Kubernetes API is slow, the plugin might miss the deletion event.
 *   **Fix:** Press `Ctrl+F` (Force Refresh).
 
 **2. UI Freezes**
-Calls to `kubectl` are wrapped in a 2-second timeout. If your cluster is unresponsive, you will see an error message in the header (e.g., `Err: context deadline exceeded`).
+API calls are wrapped in a 2-second timeout (5 seconds for scale/restart/rollback). If your cluster is unresponsive, you will see an error message in the header (e.g., `Err: context deadline exceeded`).
 
-**3. "Unknown Command" in text input**
+**3. A deployment shows `(Err)`**
+The deployment could not be loaded (e.g. a typo in `:add`, or it was deleted). The header names it; the other deployments keep refreshing. Remove it with `-` or `:remove <name>`.
+
+**4. Wrong cluster or "context does not exist"**
+K9s Deck reads `$KUBECONFIG` (or `~/.kube/config`) like `kubectl`. Check that the context K9s passes exists there.
+
+**5. "Unknown Command" in text input**
 Ensure you are typing the command exactly as listed (e.g., `scale 1`, not `scale=1`).
 
 ---
 
 ## 🔧 Development
 
-### Architecture (v2.0.0+)
+### Architecture
 
 K9s Deck uses a modular architecture with clear separation of concerns:
 
@@ -308,6 +319,15 @@ export K9S_DECK_LOG_LEVEL=DEBUG  # DEBUG, INFO, WARN, ERROR (default: INFO)
 {"time":"2025-12-02T23:00:00Z","level":"INFO","msg":"fetching deployment","deployment":"hello-app","namespace":"default","context":"kind-k9s-plugin-test"}
 {"time":"2025-12-02T23:00:00Z","level":"DEBUG","msg":"deployment fetched successfully","deployment":"hello-app","bytes":8192}
 ```
+
+### Key Improvements in v2.2.0
+
+- ✅ **Bug fixes** - Empty-command crash, refresh freeze on a failing deployment, data race, accumulating refresh loops, and more (see [CHANGELOG](CHANGELOG.md))
+- ✅ **No kubectl dependency** - Deployment logs and pod YAML now use client-go; only Helm features need a CLI (`helm`)
+- ✅ **KUBECONFIG support** - Standard kubeconfig loading rules, like `kubectl`
+- ✅ **Cleaner architecture** - The app lives in `internal/ui` and uses the `parser` and `state` packages; `main.go` is just the entry point
+- ✅ **Testable UI** - Cluster access is injected via `ui.Config`, so UI commands are tested with `k8s.MockClient`
+- ✅ **CI** - GitHub Actions runs gofmt, vet, race-enabled tests and cross-builds on every pull request; tagged releases are published automatically
 
 ### Key Improvements in v2.1.0
 

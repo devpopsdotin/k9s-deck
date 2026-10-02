@@ -5,12 +5,39 @@ All notable changes to K9s Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-10-02
+
+### Fixed
+- Crash when pressing Enter on an empty `:` command
+- One deployment failing to load (e.g. a typo in `:add`) froze the data of every other monitored deployment; it now shows an `(Err)` row and the others keep refreshing
+- `KUBECONFIG` was ignored (only `~/.kube/config` was read); the standard kubeconfig loading rules are used now
+- Data race when ordering monitored deployments during a refresh
+- Each `:fetch` started an extra, permanent refresh loop
+- Refresh requests piled up on a slow API server and could be applied out of order
+- Autocomplete suggestions never came back after deleting typed text, and the selection disappeared past the 5th suggestion
+- Enter in add/remove mode ignored the highlighted suggestion
+- The `s` shortcut rejected scaling to 0 replicas; `:scale` accepted negative counts
+- The Events tab showed events of other deployments sharing a name prefix
+- The `f` raw/formatted toggle only took effect at the next refresh
+- The resource list could leave blank rows or hide the cursor after shrinking or resizing
+- All-container pod logs skipped init containers and showed an empty view instead of an error
+- The deployment "YAML" tab showed JSON; deployment and ConfigMap views now match `kubectl -o yaml` (`apiVersion`/`kind` shown, `managedFields` hidden)
+- Events with only `eventTime` were sorted first
+- The multi-container cache grew without bound
+- Logging was disabled on Windows (log file now in `%TEMP%`)
+- Client-go integration tests failed on machines without a kubeconfig; they now skip
+
+### Added
+- Yank (`y`) on Linux supports `wl-copy` (Wayland) and `xsel` in addition to `xclip`
+- GitHub Actions CI: gofmt, `go vet`, race-enabled tests and cross-builds on every pull request
+- Release workflow: pushing a `v*` tag runs the tests and publishes the release with GoReleaser
+- Unit tests for the UI using `k8s.MockClient`
 
 ### Changed
+- Deployment logs and pod YAML use client-go instead of the `kubectl` CLI (only Helm features still need a CLI: `helm`)
 - The Bubble Tea app moved from `main.go` into `internal/ui`; `main.go` is now only the entry point
 - The UI uses `internal/parser` and `internal/state` instead of duplicated copies in `main.go`
-- The Kubernetes client, context and namespace are passed to the UI through `ui.Config` instead of package globals, so UI commands can be tested with `k8s.MockClient`
+- The Kubernetes client, context and namespace are passed to the UI through `ui.Config` instead of package globals
 
 ### Removed
 - Unused `kubectl`-based `parser.DetectMultiContainer` and duplicate cache, plus the unused `ui.Model`, message and style definitions
